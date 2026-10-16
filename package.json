@@ -1,0 +1,24 @@
+{
+  "name": "lazada-cart-price-monitor",
+  "version": "1.0.0",
+  "description": "Lazada Cart Price Monitor with Web Dashboard, Audio Alert & Telegram Push Notification",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/price-checker.test.js && node tests/logger.test.js && node tests/telegram.test.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "^1.44.0",
+    "ws": "^8.17.0"
+  },
+  "keywords": [
+    "lazada",
+    "price-monitor",
+    "automation",
+    "playwright",
+    "telegram-alert"
+  ],
+  "author": "",
+  "license": "MIT"
+}

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lazada Price Monitor - Hệ thống giám sát giỏ hàng tự động</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-icon">🛒</span>
+        <div class="brand-text">
+          <h1>LAZADA CART PRICE MONITOR</h1>
+          <p>Giám sát giá giỏ hàng tự động • Cảnh báo âm thanh • Thông báo Android Telegram</p>
+        </div>
+      </div>
+      <div class="header-status-badge" id="systemStatusBadge">
+        <span class="status-dot"></span>
+        <span id="systemStatusText">Đã dừng</span>
+      </div>
+    </header>
+
+    <!-- Alert Banner (khi phát hiện giá thấp) -->
+    <div class="alert-banner" id="alertBanner" style="display: none;">
+      <div class="alert-banner-content">
+        <div class="alert-icon-pulse">🚨</div>
+        <div class="alert-info">
+          <h3>PHÁT HIỆN SẢN PHẨM CÓ GIÁ DƯỚI NGƯỠNG!</h3>
+          <div id="alertProductList" class="alert-product-list"></div>
+          <div class="alert-timer-wrap">
+            <span>Âm thanh cảnh báo sẽ tự tắt sau: <strong id="alertCountdown">30</strong>s</span>
+          </div>
+        </div>
+        <div class="alert-actions">
+          <button id="btnStopAudio" class="btn btn-danger btn-lg pulse-btn">
+            🛑 DỪNG THÔNG BÁO (TẮT CÒI)
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Grid -->
+    <main class="main-content">
+      <!-- Cột Trái: Điều khiển & Cấu hình -->
+      <section class="panel control-panel">
+        <h2 class="panel-title">⚙️ Điều khiển & Cấu hình giám sát</h2>
+
+        <!-- Khối nút bấm chính -->
+        <div class="action-buttons-group">
+          <button id="btnStart" class="btn btn-primary">
+            ▶️ BẮT ĐẦU GIÁM SÁT
+          </button>
+          <button id="btnStop" class="btn btn-secondary" disabled>
+            ⏹️ DỪNG GIÁM SÁT
+          </button>
+          <button id="btnOpenLogin" class="btn btn-warning" style="grid-column: span 2; background: #ea580c; color: white;">
+            🔑 MỞ TRANG ĐĂNG NHẬP LAZADA (QUÉT QR)
+          </button>
+          <button id="btnTestAudio" class="btn btn-outline" style="grid-column: span 2;">
+            🔊 KIỂM TRA ÂM THANH
+          </button>
+        </div>
+
+        <div id="loginNoticeBox" style="display: none; background: #fff7ed; border: 2px solid #ea580c; padding: 14px 18px; border-radius: 10px; margin-bottom: 16px; font-size: 13px; color: #9a3412;">
+          <p style="font-size: 15px;"><strong>📱 QUÉT MÃ QR ĐĂNG NHẬP LAZADA</strong></p>
+          <p style="margin-top: 6px; color: #431407;">Mở ứng dụng Lazada trên điện thoại và quét mã QR bên dưới, hoặc đăng nhập trực tiếp trên cửa sổ trình duyệt Chromium thật dưới thanh Taskbar:</p>
+          <p style="margin-top: 4px; font-size: 12px; color: #c2410c;"><em>💡 MẸO: Bạn có thể bấm chuột trực tiếp vào hình dưới đây để điều khiển cửa sổ đăng nhập!</em></p>
+          <div id="qrImageWrap" style="text-align: center; margin: 12px 0;">
+            <img id="loginQrImg" src="" alt="Mã QR Lazada" style="max-width: 100%; max-height: 280px; border-radius: 8px; border: 2px solid #ea580c; display: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+            <p id="qrLoadingText" style="color: #c2410c; font-style: italic;">Đang tải mã QR từ Lazada...</p>
+          </div>
+          <p style="margin-top: 6px;"><a href="https://member.lazada.vn/user/login" target="_blank" style="color: #ea580c; font-weight: bold; text-decoration: underline;">👉 Hoặc bấm vào đây để mở tab đăng nhập Lazada trên trình duyệt này</a></p>
+          <div style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed #fdba74; display: flex; justify-content: space-between; align-items: center;">
+            <span id="loginCheckStatus">⏳ Đang đợi bạn quét QR / đăng nhập...</span>
+            <button type="button" id="btnRefreshQr" class="btn btn-outline" style="padding: 4px 10px; font-size: 12px;">🔄 Tải lại QR</button>
+          </div>
+        </div>
+
+        <!-- Form thiết lập -->
+        <form id="configForm" class="config-form">
+          <div class="form-group">
+            <label for="cartUrl">Đường dẫn giỏ hàng Lazada (URL):</label>
+            <input type="text" id="cartUrl" name="cartUrl" placeholder="https://cart.lazada.vn/cart" value="https://cart.lazada.vn/cart" required>
+            <small class="form-hint">Bạn có thể dán link giỏ hàng trực tiếp hoặc link có mã giới thiệu / phân loại.</small>
+          </div>
+
+          <div class="form-group">
+            <label for="priceThreshold">Ngưỡng cảnh báo giá (VNĐ):</label>
+            <div class="input-with-unit">
+              <input type="number" id="priceThreshold" name="priceThreshold" min="1000" step="1000" value="550000" required>
+              <span class="unit">VNĐ</span>
+            </div>
+            <small class="form-hint">Cảnh báo ngay khi giá sản phẩm &lt; ngưỡng này (mặc định 550.000 VNĐ).</small>
+          </div>
+
+          <div class="form-group">
+            <label for="checkIntervalSeconds">Khoảng thời gian giữa các chu kỳ quét (giây):</label>
+            <div class="input-with-unit">
+              <input type="number" id="checkIntervalSeconds" name="checkIntervalSeconds" min="5" step="5" value="30" required>
+              <span class="unit">giây</span>
+            </div>
+            <small class="form-hint">Sau khi quét xong toàn bộ giỏ hàng và tải lại trang, chờ đủ số giây này để quét chu kỳ tiếp (Mặc định: 30s).</small>
+          </div>
+
+          <div class="form-group form-checkbox">
+            <label>
+              <input type="checkbox" id="repeatAlertOnSameLowPrice">
+              <span>Cảnh báo lại ở mỗi chu kỳ dù giá không đổi (Mặc định: TẮT - chỉ báo khi có giá thấp mới)</span>
+            </label>
+          </div>
+
+          <div class="form-group form-checkbox" style="background: #f0fdf4; border: 1px solid #86efac; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px;">
+            <label style="color: #166534; font-weight: 600; display: flex; align-items: flex-start; gap: 8px;">
+              <input type="checkbox" id="autoOrder" checked style="margin-top: 3px;">
+              <span>⚡ Tự động tích chọn &amp; Đặt hàng khi giá dưới ngưỡng (Auto Order)</span>
+            </label>
+            <small class="form-hint" style="color: #15803d; margin-top: 4px; display: block; line-height: 1.4;">
+              Khi phát hiện sản phẩm có giá &lt; ngưỡng: Tự động tích ô dấu tích của sản phẩm (Hình 1) ➔ Bấm nút THANH TOÁN (Hình 2) ➔ Bấm nút Đặt hàng (Hình 3).
+            </small>
+          </div>
+
+          <div class="form-group">
+            <label for="maxLogEntries">Tự động xóa bớt log cũ khi vượt quá:</label>
+            <div class="input-with-unit">
+              <input type="number" id="maxLogEntries" name="maxLogEntries" min="50" max="5000" step="50" value="500" required>
+              <span class="unit">bản ghi</span>
+            </div>
+            <small class="form-hint">Hệ thống sẽ tự động dọn bớt các log cũ khi số lượng vượt ngưỡng này để web luôn nhẹ và mượt.</small>
+          </div>
+
+          <hr class="divider">
+
+          <!-- Cấu hình Telegram -->
+          <div class="telegram-section">
+            <div class="section-header">
+              <h3>📱 Thông báo Android qua Telegram Bot</h3>
+              <label class="switch">
+                <input type="checkbox" id="telegramEnabled">
+                <span class="slider round"></span>
+              </label>
+            </div>
+            <p class="section-desc">Gửi thông báo đẩy về ứng dụng Telegram trên điện thoại Android khi phát hiện giá thấp.</p>
+
+            <div id="telegramFields" class="telegram-fields">
+              <div class="form-group">
+                <label for="telegramBotToken">Bot Token (từ @BotFather):</label>
+                <input type="password" id="telegramBotToken" placeholder="VD: 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ">
+                <button type="button" id="btnToggleToken" class="btn-text">👁️ Hiện/Ẩn token</button>
+              </div>
+
+              <div class="form-group">
+                <label for="telegramChatId">Chat ID hoặc User ID (có thể nhập nhiều ID):</label>
+                <input type="text" id="telegramChatId" placeholder="VD: 123456789, 987654321 (cách nhau bởi dấu phẩy)">
+                <small class="form-hint" style="color: #64748b; font-size: 11px; margin-top: 4px; display: block;">
+                  💡 Có thể nhập nhiều Chat ID / User ID cách nhau bởi dấu phẩy <code>,</code> hoặc khoảng trắng để nhận thông báo trên nhiều tài khoản/nhóm cùng lúc.
+                </small>
+              </div>
+
+              <div class="form-group form-checkbox">
+                <label>
+                  <input type="checkbox" id="telegramBatch" checked>
+                  <span>Gộp nhiều sản phẩm giảm giá trong 1 chu kỳ vào 1 tin nhắn</span>
+                </label>
+              </div>
+
+              <div class="telegram-actions">
+                <button type="button" id="btnTestTelegram" class="btn btn-outline-info">
+                  📲 GỬI THÔNG BÁO THỬ
+                </button>
+                <span id="telegramTestResult" class="test-result-msg"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-success">💾 LƯU CẤU HÌNH</button>
+            <span id="saveConfigMsg" class="save-msg"></span>
+          </div>
+        </form>
+
+        <!-- Thống kê chu kỳ hiện tại -->
+        <div class="stats-card">
+          <h3 class="stats-title">📊 Tiến độ chu kỳ hiện tại</h3>
+          <div class="stats-grid">
+            <div class="stat-item">
+              <span class="stat-label">Chu kỳ quét</span>
+              <span class="stat-value" id="statCycle">0</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Sản phẩm đã quét</span>
+              <span class="stat-value" id="statScanned">0</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Sản phẩm giá thấp</span>
+              <span class="stat-value alert-text" id="statAlertCount">0</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Chu kỳ tiếp theo</span>
+              <span class="stat-value" id="statNextCycle">--</span>
+            </div>
+          </div>
+          <div class="monitor-live-message" id="monitorLiveMsg">
+            Sẵn sàng. Nhấn "Bắt đầu giám sát" để khởi động.
+          </div>
+        </div>
+      </section>
+
+      <!-- Cột Phải: Danh sách sản phẩm giá thấp & Lịch sử -->
+      <section class="panel history-panel">
+        <div class="panel-header-flex">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <h2 class="panel-title" style="margin-bottom: 0;">📋 Lịch sử quét & Cảnh báo</h2>
+            <span id="logCountBadge" style="font-size: 12px; color: var(--text-secondary); background: #f1f5f9; padding: 2px 8px; border-radius: 12px; font-weight: normal;">0 bản ghi</span>
+          </div>
+          <div class="history-actions">
+            <button type="button" id="btnAutoCleanLogs" class="btn btn-sm btn-outline-warning" title="Tự động xóa bớt các log cũ theo ngưỡng cài đặt">🧹 Tự xóa log cũ</button>
+            <button type="button" id="btnExportCSV" class="btn btn-sm btn-outline">📥 Xuất CSV</button>
+            <button type="button" id="btnExportJSON" class="btn btn-sm btn-outline">📥 Xuất JSON</button>
+            <button type="button" id="btnClearLogs" class="btn btn-sm btn-outline-danger">🗑️ Xóa hết</button>
+          </div>
+        </div>
+
+        <!-- Bộ lọc Log -->
+        <div class="filter-bar">
+          <div class="filter-item">
+            <label>Kết quả:</label>
+            <select id="filterStatus">
+              <option value="ALL">Tất cả</option>
+              <option value="ORDER_PLACED">⚡ ĐÃ ĐẶT HÀNG</option>
+              <option value="SUCCESS">✅ SUCCESS (Thành công)</option>
+              <option value="ALERT">🚨 ALERT (Giá thấp)</option>
+              <option value="ERROR">❌ ERROR (Lỗi)</option>
+            </select>
+          </div>
+          <div class="filter-item">
+            <label>Tìm tên sản phẩm:</label>
+            <input type="text" id="filterProductName" placeholder="Nhập từ khóa...">
+          </div>
+          <div class="filter-item">
+            <button id="btnApplyFilter" class="btn btn-sm btn-secondary">🔍 Lọc</button>
+            <button id="btnResetFilter" class="btn btn-sm btn-link">Đặt lại</button>
+          </div>
+        </div>
+
+        <!-- Bảng Log -->
+        <div class="table-container">
+          <table class="log-table" id="logTable">
+            <thead>
+              <tr>
+                <th>Thời gian</th>
+                <th>Chu kỳ</th>
+                <th>Tên sản phẩm</th>
+                <th>Giá hiện tại</th>
+                <th>Ngưỡng</th>
+                <th>Kết quả</th>
+                <th>Âm thanh</th>
+                <th>Android</th>
+                <th>Chi tiết / Lỗi</th>
+              </tr>
+            </thead>
+            <tbody id="logTableBody">
+              <tr>
+                <td colspan="9" class="text-center text-muted">Chưa có dữ liệu nhật ký quét.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>Lazada Cart Price Monitor • Hoạt động cục bộ trên máy tính • Không lưu cookie/mật khẩu vào nhật ký.</p>
+    </footer>
+  </div>
+
+  <script src="audio.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

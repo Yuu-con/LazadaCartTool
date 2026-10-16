@@ -1,0 +1,17 @@
+{
+  "cartUrl": "https://cart.lazada.vn/cart",
+  "priceThreshold": 550000,
+  "checkIntervalSeconds": 30,
+  "autoOrder": true,
+  "repeatAlertOnSameLowPrice": false,
+  "maxLogEntries": 500,
+  "autoCleanNormalLogs": true,
+  "onlyAlerts": true,
+  "logRetentionDays": 3,
+  "telegram": {
+    "enabled": false,
+    "botToken": "",
+    "chatId": "",
+    "batchNotifications": true
+  }
+}
