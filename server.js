@@ -148,59 +148,83 @@ app.get('/api/monitor/inspect-cart', async (req, res) => {
       return res.status(400).json({ error: 'Page not open' });
     }
     const info = await monitor.page.evaluate(() => {
-      // 1. Inspect first cart item
-      const firstItem = document.querySelector('.cart-item, [id^="item_"]');
-      let itemInfo = null;
-      if (firstItem) {
-        const checkboxes = Array.from(firstItem.querySelectorAll('input[type="checkbox"], .next-checkbox, label'));
-        itemInfo = {
-          id: firstItem.id,
-          className: firstItem.className,
-          outerHtmlPrefix: firstItem.outerHTML.slice(0, 500),
-          checkboxes: checkboxes.map(cb => ({
-            tag: cb.tagName,
-            type: cb.type,
-            className: cb.className,
-            checked: cb.checked,
-            outerHTML: cb.outerHTML.slice(0, 200)
-          }))
-        };
-      }
+      const rawNodes = Array.from(document.querySelectorAll('.cart-item, [id^="item_"]'));
+      const reasons = {
+        total: rawNodes.length,
+        shopOrHeader: 0,
+        nestedChild: 0,
+        recommendation: 0,
+        disabledOrDeletedClass: 0,
+        disabledParent: 0,
+        outOfStockText: 0,
+        noCheckbox: 0,
+        checkboxDisabled: 0,
+        noProductNameOrPrice: 0,
+        validPassed: 0,
+        sampleFiltered: []
+      };
 
-      // 2. Inspect Select All
-      const selectAllEl = Array.from(document.querySelectorAll('*')).find(el => (el.innerText || '').includes('CHỌN TẤT CẢ') || (el.innerText || '').includes('Chọn tất cả'));
-      let selectAllInfo = null;
-      if (selectAllEl) {
-        const parent = selectAllEl.closest('div') || selectAllEl;
-        const cb = parent.querySelector('input[type="checkbox"], .next-checkbox');
-        selectAllInfo = {
-          text: selectAllEl.innerText,
-          parentHtml: parent.outerHTML.slice(0, 300),
-          cbInfo: cb ? { tag: cb.tagName, className: cb.className, checked: cb.checked, outerHTML: cb.outerHTML.slice(0, 200) } : null
-        };
-      }
+      rawNodes.forEach(node => {
+        if (!node) return;
+        if (node.classList.contains('checkout-shop') || node.classList.contains('list-header') || node.classList.contains('cart-item-list')) {
+          reasons.shopOrHeader++;
+          return;
+        }
+        if (rawNodes.some(other => other !== node && other.contains(node))) {
+          reasons.nestedChild++;
+          return;
+        }
+        if (node.closest('.recommend-list, .cart-recommend, [class*="recommend"], [class*="just-for-you"], [class*="similar"], [data-spm*="recommend"]')) {
+          reasons.recommendation++;
+          return;
+        }
+        if (node.classList.contains('cart-item-disabled') || node.classList.contains('item-del')) {
+          reasons.disabledOrDeletedClass++;
+          return;
+        }
+        if (node.closest('.cart-item-list-disabled, .disabled-items, [class*="unavailable"], [class*="disabled-item"]')) {
+          reasons.disabledParent++;
+          return;
+        }
+        const textContent = (node.innerText || node.textContent || '').toLowerCase();
+        if (textContent.includes('sản phẩm này tạm thời hết hàng') ||
+            textContent.includes('hết hàng') ||
+            textContent.includes('hàng không có sẵn') ||
+            textContent.includes('đã xóa') ||
+            textContent.includes('ngừng kinh doanh')) {
+          reasons.outOfStockText++;
+          return;
+        }
+        const cbInput = node.querySelector('input[type="checkbox"]');
+        const cbLabel = node.querySelector('.cart-item-checkbox, .next-checkbox');
+        if (!cbInput && !cbLabel) {
+          reasons.noCheckbox++;
+          if (reasons.sampleFiltered.length < 3) {
+            reasons.sampleFiltered.push({ reason: 'noCheckbox', id: node.id, cls: node.className, text: node.innerText?.slice(0, 100) });
+          }
+          return;
+        }
+        if (cbInput && (cbInput.disabled || cbInput.getAttribute('aria-disabled') === 'true')) {
+          reasons.checkboxDisabled++;
+          return;
+        }
+        if (cbLabel && cbLabel.classList.contains('disabled')) {
+          reasons.checkboxDisabled++;
+          return;
+        }
 
-      // 3. Inspect Checkout Button
-      const checkoutButtons = Array.from(document.querySelectorAll('button, a')).filter(el => {
-        const t = (el.innerText || el.textContent || '').trim();
-        return t.includes('THANH TOÁN') || t.includes('Thanh toán') || t.includes('Đặt hàng');
+        reasons.validPassed++;
       });
 
-      const buttonsInfo = checkoutButtons.map(btn => ({
-        tag: btn.tagName,
-        className: btn.className,
-        text: btn.innerText.trim(),
-        disabled: btn.disabled || btn.getAttribute('disabled'),
-        outerHTML: btn.outerHTML.slice(0, 250)
-      }));
-
-      return { itemInfo, selectAllInfo, buttonsInfo };
+      return reasons;
     });
+
     res.json(info);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 app.post('/api/monitor/test-select-item', async (req, res) => {
   try {
