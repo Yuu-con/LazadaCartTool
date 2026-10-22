@@ -58,6 +58,14 @@ test('Parse: "2.955.000" -> 2955000 (Không có giảm thì giữ nguyên giá)'
   assert.strictEqual(parseVNDPrice('2.955.000'), 2955000);
 });
 
+test('Parse: "Giảm 404.200 đ\\n1.849.000 đ" -> 1849000 (Loại bỏ số tiền voucher, lấy đúng đơn giá)', () => {
+  assert.strictEqual(parseVNDPrice('Giảm 404.200 đ\n1.849.000 đ'), 1849000);
+});
+
+test('Parse: "Voucher -404.200 ₫ 2.499.000 ₫" -> 2499000 (Loại bỏ voucher âm)', () => {
+  assert.strictEqual(parseVNDPrice('Voucher -404.200 ₫ 2.499.000 ₫'), 2499000);
+});
+
 // 2. Nghiệm thu Case 1: Giá 600.000 VNĐ -> Không cảnh báo (NORMAL)
 test('Nghiệm thu 1: Giá 600.000 VNĐ với ngưỡng 550.000 -> NORMAL, không cảnh báo', () => {
   const res = evaluatePriceStatus(600000, 550000);

@@ -22,9 +22,14 @@ function parseVNDPrice(rawText) {
     }
   }
 
+  // 1.1. Loại bỏ các giá trị thuộc nhãn voucher / mã giảm giá (ví dụ: "Giảm 404.200 đ", "Voucher -404.200", "Tiết kiệm 50.000")
+  // Không được nhầm số tiền giảm voucher với đơn giá sản phẩm.
+  const textWithoutVouchers = clean.replace(/(?:voucher|giảm\s*(?!đã)|mã\s*giảm|tiết\s*kiệm|-)\s*(?:₫\s*)?[\d.,]{3,}\s*(?:₫|đ|vnđ)?/gi, ' ');
+
   // 2. Nếu chuỗi chứa nhiều số giá (ví dụ cả giá gốc và giá đã giảm như "1.940.000 \n 1.043.000"):
   // Người dùng yêu cầu: lấy giá đã giảm chứ đừng lấy giá gốc -> Lấy giá THẤP HƠN!
-  const allNumberMatches = clean.match(/[\d.,]{3,}/g);
+  const targetTextForMultiple = textWithoutVouchers.trim() ? textWithoutVouchers : clean;
+  const allNumberMatches = targetTextForMultiple.match(/[\d.,]{3,}/g);
   if (allNumberMatches && allNumberMatches.length > 1) {
     const candidates = allNumberMatches
       .map(str => parseInt(str.replace(/[^0-9]/g, ''), 10))
@@ -37,7 +42,7 @@ function parseVNDPrice(rawText) {
   // 3. Chuẩn hóa chuỗi giá đơn thông thường
   // Loại bỏ các ký hiệu tiền tệ và chữ cái thừa
   // "₫", "đ", "VND", "vnđ", v.v.
-  const withoutCurrency = clean
+  const withoutCurrency = targetTextForMultiple
     .replace(/[₫đĐ]/gi, '')
     .replace(/\bvnd\b/gi, '')
     .trim();
