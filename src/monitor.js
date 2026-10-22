@@ -136,32 +136,59 @@ class LazadaPriceMonitor {
     if (!this.page || this.page.isClosed()) return false;
     try {
       const curUrl = this.page.url();
-      const pageInfo = await this.page.evaluate(() => {
-        const text = document.body ? document.body.innerText : '';
-        const cartItems = document.querySelectorAll('.cart-item, [class*="cart-item"], .cart-item-list').length;
-        const hasSelectAll = text.includes('CHỌN TẤT CẢ') || text.includes('Chọn tất cả');
-        const hasAccount = !!document.querySelector('#myAccount, [data-spm*="my_account"], .account-info, [class*="member-name"]') ||
-                            text.includes('TÀI KHOẢN') || text.includes('Xin chào') || text.includes('Quản lý tài khoản');
-        const isGuestCart = text.includes('Bạn chưa thêm sản phẩm nào vào giỏ') &&
-                            (text.includes('Đăng nhập / Đăng ký') || text.includes('ĐĂNG NHẬP'));
-        return { cartItems, hasSelectAll, hasAccount, isGuestCart };
-      });
-
-      if (pageInfo.cartItems > 0 || pageInfo.hasSelectAll || pageInfo.hasAccount) {
-        return true;
+      // Nếu đang ở URL login hoặc punish/captcha -> Chắc chắn chưa đăng nhập
+      if (curUrl.includes('member/login') || curUrl.includes('login.lazada.vn') || curUrl.includes('punish') || curUrl.includes('_____tmd_____')) {
+        return false;
       }
 
+      const pageInfo = await this.page.evaluate(() => {
+        const text = document.body ? document.body.innerText : '';
+        const header = document.querySelector('.top-header, #topActionUser, [class*="header"], header') || document.body;
+        const headerText = header ? header.innerText : '';
+
+        // 1. DẤU HIỆU RÕ RÀNG CHƯA ĐĂNG NHẬP (GUEST):
+        // Nếu trên thanh header xuất hiện "ĐĂNG NHẬP" và "ĐĂNG KÝ" -> TUYỆT ĐỐI CHƯA ĐĂNG NHẬP dù có bao nhiêu sản phẩm trong giỏ!
+        const hasLoginLink = !!document.querySelector('a[href*="member.lazada.vn/user/login"], a[href*="login.lazada.vn"], [data-spm*="dlogin"], a[href*="/user/signup"]');
+        const hasLoginText = (headerText.includes('ĐĂNG NHẬP') && headerText.includes('ĐĂNG KÝ')) ||
+                             (headerText.includes('LOGIN') && headerText.includes('SIGNUP')) ||
+                             (text.includes('Bạn chưa thêm sản phẩm nào vào giỏ') && text.includes('ĐĂNG NHẬP'));
+
+        if (hasLoginLink || hasLoginText) {
+          return { isLoggedIn: false, reason: 'Có nút Đăng nhập / Đăng ký trên thanh tiêu đề' };
+        }
+
+        // 2. DẤU HIỆU CHẮC CHẮN ĐÃ ĐĂNG NHẬP:
+        // Phải có thẻ myAccount, tên tài khoản hoặc cụm từ quản lý tài khoản
+        const accountEl = document.querySelector('#myAccount, [data-spm*="my_account"], .account-info, [class*="member-name"], [class*="user-name"], .top-account');
+        const hasAccountText = headerText.includes('TÀI KHOẢN') || headerText.includes('Xin chào') || headerText.includes('Quản lý tài khoản') || text.includes('TÀI KHOẢN CỦA TÔI');
+
+        if (accountEl || hasAccountText) {
+          return {
+            isLoggedIn: true,
+            accountName: accountEl ? accountEl.innerText.trim() : 'Tài khoản Lazada'
+          };
+        }
+
+        return { isLoggedIn: false, reason: 'Chưa tìm thấy thẻ thông tin tài khoản' };
+      });
+
+      if (!pageInfo.isLoggedIn) {
+        return false;
+      }
+
+      // 3. Kiểm tra thêm cookie user_id (Lazada chỉ cấp user_id khi đã đăng nhập tài khoản thực tế)
       if (this.browserContext) {
         const cookies = await this.browserContext.cookies();
-        const hasAuth = cookies.some(c => c.domain.includes('lazada') && (
-          c.name === 'lzd_sid' || c.name === 'x5sec' || c.name === 'user_id' || c.name === 'uc4' || c.name === 'cookie2'
+        const hasUserId = cookies.some(c => c.domain.includes('lazada') && (
+          (c.name === 'user_id' && c.value && c.value.length > 2) ||
+          (c.name === 'lzd_cid' && c.value && c.value.length > 5)
         ));
-        if (hasAuth && !curUrl.includes('member/login') && !curUrl.includes('login.lazada.vn')) {
+        if (hasUserId) {
           return true;
         }
       }
 
-      return false;
+      return pageInfo.isLoggedIn;
     } catch (e) {
       return false;
     }
@@ -174,23 +201,15 @@ class LazadaPriceMonitor {
     this.isTransitioningToCart = true;
 
     try {
-      console.log('[Monitor] 🎉 Phát hiện đăng nhập thành công! Bắt đầu chuyển về giỏ hàng và quét tự động...');
-      if (this.cycleTimer) {
-        clearTimeout(this.cycleTimer);
-        this.cycleTimer = null;
-      }
-
-      this.isRunning = true;
-      this.isStopping = false;
-      this.currentState = 'RUNNING';
+      console.log('[Monitor] 🎉 Xác nhận đăng nhập thành công! Đang đồng bộ trạng thái...');
       this.isLoginErrorLogged = false;
 
       const config = loadConfig();
       const targetCartUrl = (config.cartUrl && config.cartUrl.trim()) ? config.cartUrl.trim() : LAZADA_CART_URL;
 
       this.emitState({
-        state: 'RUNNING',
-        message: '🎉 Đăng nhập thành công! Đang chuyển về giỏ hàng và bắt đầu quét sản phẩm...'
+        type: 'LOGIN_CONFIRMED',
+        message: '🎉 Đăng nhập thành công! Bạn có thể bắt đầu giám sát bất kỳ lúc nào.'
       });
 
       if (this.page && !this.page.isClosed()) {
@@ -198,15 +217,10 @@ class LazadaPriceMonitor {
         if (!curUrl.includes('/cart')) {
           console.log('[Monitor] Điều hướng về trang giỏ hàng:', targetCartUrl);
           await this.safeNavigate(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-          await this.page.waitForTimeout(2000);
         }
       }
-
-      // Ngay lập tức chạy chu kỳ quét giỏ hàng
-      this.runCycle();
     } catch (err) {
       console.error('[Monitor] Lỗi khi chuyển về giỏ hàng sau đăng nhập:', err.message);
-      this.scheduleNextCycle(5);
     } finally {
       this.isTransitioningToCart = false;
     }
@@ -215,17 +229,8 @@ class LazadaPriceMonitor {
   async start(options = {}) {
     if (this.isRunning && this.currentState !== 'WAITING_LOGIN' && this.currentState !== 'ERROR') {
       console.log('[Monitor] Tiến trình giám sát đã đang chạy.');
-      if (options && options.openLogin) {
-        return await this.openLoginPageAndPrepareQr();
-      }
-      return;
+      return { success: true, message: 'Tiến trình giám sát đã đang chạy.' };
     }
-
-    this.isRunning = true;
-    this.isStopping = false;
-    this.retryCount = 0;
-    this.currentState = 'INITIALIZING';
-    this.emitState({ state: 'RUNNING', message: 'Đang khởi chạy trình duyệt Chromium...' });
 
     try {
       await this.ensureBrowser();
@@ -234,36 +239,50 @@ class LazadaPriceMonitor {
         return await this.openLoginPageAndPrepareQr();
       }
 
+      // BẮT BUỘC KIỂM TRA ĐĂNG NHẬP TRƯỚC KHI CHẠY GIÁM SÁT:
+      // Tách biệt hoàn toàn việc đăng nhập với quét: Nếu chưa đăng nhập thì KHÔNG ĐƯỢC CHẠY
+      const loggedIn = await this.checkIsLoggedIn();
+      if (!loggedIn) {
+        console.log('[Monitor] ⚠️ Chưa đăng nhập! Yêu cầu đăng nhập trước khi bắt đầu giám sát.');
+        this.isRunning = false;
+        this.isLoginMode = true;
+        this.currentState = 'WAITING_LOGIN';
+        await this.openLoginPageAndPrepareQr();
+        return {
+          success: false,
+          isLoginNeeded: true,
+          message: 'Bạn chưa đăng nhập tài khoản Lazada. Vui lòng quét mã QR hoặc đăng nhập trước khi bắt đầu giám sát.'
+        };
+      }
+
+      // Đã xác nhận đăng nhập thực sự -> Kích hoạt chạy giám sát
+      this.isLoginMode = false;
+      this.isRunning = true;
+      this.isStopping = false;
+      this.retryCount = 0;
+      this.currentState = 'RUNNING';
+      this.emitState({ state: 'RUNNING', message: 'Đã xác nhận đăng nhập. Bắt đầu chu kỳ giám sát giỏ hàng...' });
+
       const config = loadConfig();
       const targetCartUrl = (config.cartUrl && config.cartUrl.trim()) ? config.cartUrl.trim() : LAZADA_CART_URL;
 
-      // Kiểm tra xem hiện tại đã đăng nhập chưa
-      const loggedIn = await this.checkIsLoggedIn();
-      if (loggedIn) {
-        if (this.page && !this.page.isClosed()) {
-          const curUrl = this.page.url();
-          if (!curUrl.includes('/cart')) {
-            this.currentState = 'NAVIGATING';
-            this.emitState({ message: `Đang mở trang giỏ hàng Lazada: ${targetCartUrl}` });
-            await this.safeNavigate(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-            await this.page.waitForTimeout(2000);
-          }
+      if (this.page && !this.page.isClosed()) {
+        const curUrl = this.page.url();
+        if (!curUrl.includes('/cart')) {
+          this.currentState = 'NAVIGATING';
+          this.emitState({ message: `Đang mở trang giỏ hàng Lazada: ${targetCartUrl}` });
+          await this.safeNavigate(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
         }
-        this.runCycle();
-        return;
       }
 
-      this.currentState = 'NAVIGATING';
-      this.emitState({ message: `Đang mở trang giỏ hàng Lazada: ${targetCartUrl}` });
-      await this.safeNavigate(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-
-      // Bắt đầu chu kỳ quét đầu tiên
       this.runCycle();
+      return { success: true, message: 'Đã bắt đầu giám sát giỏ hàng.' };
     } catch (err) {
-      console.error('[Monitor] Lỗi khởi động trình duyệt:', err);
+      console.error('[Monitor] Lỗi khởi động giám sát:', err);
       this.currentState = 'ERROR';
       this.isRunning = false;
       this.emitState({ message: `Lỗi khởi động: ${err.message}` });
+      return { success: false, error: err.message };
     }
   }
 
@@ -555,6 +574,7 @@ class LazadaPriceMonitor {
       if (!this.page.url().includes('punish')) {
         return { ready: true };
       }
+      return { ready: false, isLoginNeeded: false, message: 'Lazada yêu cầu kéo thanh trượt chống bot.' };
     }
 
     // 1. Kiểm tra nếu bị chuyển hướng sang trang đăng nhập
@@ -566,52 +586,21 @@ class LazadaPriceMonitor {
       };
     }
 
-    // 2. Kiểm tra nhanh xem trên trang đã có sản phẩm giỏ hàng hoặc nút Chọn tất cả
-    const cartReady = await this.page.evaluate(() => {
-      const items = document.querySelectorAll('.cart-item, [class*="cart-item"], .cart-item-list, .cart-item-title, [id^="item_"]');
+    // 2. Kiểm tra nếu có popup chống bot (Baxia Dialog / Slide verify) trên trang giỏ hàng
+    const hasCaptchaPopup = await this.page.evaluate(() => {
+      const baxia = document.querySelector('#baxia-dialog-content, .baxia-dialog, div[class*="baxia"], div[id*="nocaptcha"]');
       const text = document.body ? document.body.innerText : '';
-      const hasSelectAll = text.includes('CHỌN TẤT CẢ') || text.includes('Chọn tất cả');
-      return items.length > 0 || hasSelectAll;
+      return !!baxia || text.includes('Please drag the slider to verify') || text.includes('Please slide to verify');
     }).catch(() => false);
 
-    if (cartReady) {
-      return { ready: true };
+    if (hasCaptchaPopup) {
+      console.log('[Monitor] ⚠️ Phát hiện popup chống bot trên giỏ hàng, tiến hành tự động kéo thanh trượt...');
+      await this.handleCaptchaIfPresent();
     }
 
-    // 3. Nếu chưa thấy ngay (do React/Vue đang render), chờ tối đa 3.5s cho container xuất hiện
-    try {
-      await this.page.waitForSelector('.cart-item, [id^="item_"], .list-header, .cart-empty, .cart-header', { timeout: 3500 });
-      return { ready: true };
-    } catch (e) {}
-
-    // 4. Kiểm tra auth cookie trong trình duyệt
-    let hasAuthCookie = false;
-    if (this.browserContext) {
-      try {
-        const cookies = await this.browserContext.cookies();
-        hasAuthCookie = cookies.some(c => c.domain.includes('lazada') && (
-          c.name === 'lzd_sid' || c.name === 'x5sec' || c.name === 'user_id' || c.name === 'uc4' || c.name === 'cookie2'
-        ));
-      } catch (e) {}
-    }
-
-    // 5. Kiểm tra trạng thái guest / login
-    const checkState = await this.page.evaluate(() => {
-      const text = document.body ? document.body.innerText : '';
-      const isGuestCart = text.includes('Bạn chưa thêm sản phẩm nào vào giỏ') &&
-                          (text.includes('Đăng nhập / Đăng ký') || text.includes('ĐĂNG NHẬP'));
-      const hasLoginButton = text.includes('ĐĂNG NHẬP') && text.includes('ĐĂNG KÝ');
-      const hasAccountName = !!document.querySelector('#myAccount, [data-spm*="my_account"], .account-info, [class*="member-name"]') ||
-                            text.includes('TÀI KHOẢN') || text.includes('Xin chào');
-      const hasCart = !!document.querySelector('.cart-empty, .cart-item, .cart-header, [class*="cart-"]');
-      return { isGuestCart, hasLoginButton, hasAccountName, hasCart };
-    }).catch(() => ({ hasCart: false }));
-
-    if (checkState.hasCart && hasAuthCookie) {
-      return { ready: true };
-    }
-
-    if (!hasAuthCookie && (checkState.isGuestCart || (!checkState.hasAccountName && checkState.hasLoginButton))) {
+    // 3. Kiểm tra xem người dùng có thực sự đăng nhập chưa bằng hàm kiểm tra chuẩn xác
+    const loggedIn = await this.checkIsLoggedIn();
+    if (!loggedIn) {
       return {
         ready: false,
         isLoginNeeded: true,
@@ -619,7 +608,26 @@ class LazadaPriceMonitor {
       };
     }
 
-    return { ready: true };
+    // 4. Nếu đã đăng nhập, kiểm tra nhanh xem trên trang đã có sản phẩm giỏ hàng hoặc nút Chọn tất cả
+    const cartReady = await this.page.evaluate(() => {
+      const items = document.querySelectorAll('.cart-item, [class*="cart-item"], .cart-item-list, .cart-item-title, [id^="item_"]');
+      const text = document.body ? document.body.innerText : '';
+      const hasSelectAll = text.includes('CHỌN TẤT CẢ') || text.includes('Chọn tất cả');
+      const hasEmpty = !!document.querySelector('.cart-empty') || text.includes('Bạn chưa thêm sản phẩm nào vào giỏ');
+      return items.length > 0 || hasSelectAll || hasEmpty;
+    }).catch(() => false);
+
+    if (cartReady) {
+      return { ready: true };
+    }
+
+    // 5. Nếu chưa thấy ngay (do React/Vue đang render), chờ tối đa 3s cho container xuất hiện
+    try {
+      await this.page.waitForSelector('.cart-item, [id^="item_"], .list-header, .cart-empty, .cart-header', { timeout: 3000 });
+      return { ready: true };
+    } catch (e) {
+      return { ready: true };
+    }
   }
 
   async getExpectedItemsCount() {
@@ -960,10 +968,12 @@ class LazadaPriceMonitor {
 
   /**
    * Tự động chuyển trang sang Đăng nhập Lazada, bấm tab QR và chụp ảnh mã QR
+   * Tách biệt hoàn toàn: Chế độ này KHÔNG tự động quét hay chạy chu kỳ giám sát!
    */
   async openLoginPageAndPrepareQr() {
     try {
-      this.isRunning = true;
+      this.isRunning = false;
+      this.isLoginMode = true;
       this.currentState = 'WAITING_LOGIN';
       this.emitState({
         type: 'LOGIN_REQUIRED',
@@ -988,6 +998,9 @@ class LazadaPriceMonitor {
         await this.safeNavigate('https://member.lazada.vn/user/login?redirect=https%3A%2F%2Fcart.lazada.vn%2Fcart', { waitUntil: 'domcontentloaded', timeout: 35000 });
         await this.page.waitForTimeout(2000);
       }
+
+      // Xử lý CAPTCHA nếu xuất hiện ngay trên trang đăng nhập
+      await this.handleCaptchaIfPresent();
 
       // Thử click vào biểu tượng mã QR (Login with QR) cạnh tab Password nếu đang ở tab nhập mật khẩu
       let qrClicked = false;
@@ -1047,7 +1060,7 @@ class LazadaPriceMonitor {
         message: '📱 Đã mở trang đăng nhập Lazada! Vui lòng dùng ứng dụng Lazada quét mã QR để tiếp tục.'
       });
 
-      this.scheduleNextCycle(15);
+      // Tuyệt đối KHÔNG tự động hẹn giờ quét scan cycle khi người dùng đang ở chế độ đăng nhập!
 
       return {
         success: true,
@@ -1061,47 +1074,104 @@ class LazadaPriceMonitor {
   }
 
   /**
-   * Phát hiện và tự động xử lý thanh trượt xác minh (Slide CAPTCHA) của Lazada/Alibaba nếu xuất hiện
+   * Phát hiện và tự động xử lý thanh trượt xác minh (Slide CAPTCHA / Baxia Dialog) của Lazada/Alibaba nếu xuất hiện
    */
   async handleCaptchaIfPresent() {
     try {
       if (!this.page || this.page.isClosed()) return false;
 
+      const trackSelectors = [
+        '#nc_1_wrapper',
+        'div.nc_scale',
+        'div[class*="nc_scale"]',
+        '.nc_scale',
+        '#baxia-dialog-content div.nc_scale',
+        '.baxia-dialog div.nc_scale',
+        'div[id*="nc_"][class*="scale"]',
+        'div[class*="scale_text"]',
+        '.slidetounlock',
+        '.nc-container div[class*="scale"]'
+      ];
+
+      const btnSelectors = [
+        'span.btn_slide',
+        'span[class*="btn_slide"]',
+        'span[id*="_n1z"]',
+        '#nc_1_n1z',
+        '.nc_iconfont.btn_slide',
+        '[class*="btn_slide"]',
+        'div[class*="btn_slide"]'
+      ];
+
       for (const target of [this.page, ...this.page.frames()]) {
         try {
-          const trackLocator = target.locator('div[class*="nc_scale"], .nc_scale, [class*="scale"]').first();
-          if (await trackLocator.isVisible({ timeout: 1500 }).catch(() => false)) {
+          let trackLocator = null;
+          for (const sel of trackSelectors) {
+            const loc = target.locator(sel).first();
+            if (await loc.isVisible({ timeout: 400 }).catch(() => false)) {
+              trackLocator = loc;
+              break;
+            }
+          }
+
+          if (trackLocator) {
             const box = await trackLocator.boundingBox();
-            if (box && box.width > 100) {
-              console.log('[Monitor] ⚠️ Phát hiện thanh trượt xác minh (Slide CAPTCHA) Lazada! Track box:', box);
+            if (box && box.width > 80) {
+              console.log('[Monitor] ⚠️ Phát hiện thanh trượt xác minh chống bot (Slide CAPTCHA) Lazada! Track box:', box);
               this.emitState({
-                message: '⚠️ Lazada yêu cầu kéo thanh trượt xác minh... Đang tự động xử lý...'
+                message: '⚠️ Lazada yêu cầu kéo thanh trượt chống bot... Đang tự động kéo thanh trượt...'
               });
 
-              // Chờ 1.5s để JS/WASM của slider nạp đầy đủ
-              await this.page.waitForTimeout(1500);
+              // Chờ ngắn để JS/WASM của slider nạp đầy đủ
+              await this.page.waitForTimeout(600);
 
-              const startX = box.x + 22;
-              const startY = box.y + box.height / 2;
-              const distance = box.width - 44;
+              // Tìm vị trí chính xác của nút kéo
+              let btnLocator = null;
+              for (const bSel of btnSelectors) {
+                const bLoc = target.locator(bSel).first();
+                if (await bLoc.isVisible({ timeout: 200 }).catch(() => false)) {
+                  btnLocator = bLoc;
+                  break;
+                }
+              }
 
-              console.log(`[Monitor] 🔄 Bắt đầu kéo thanh trượt từ (${startX}, ${startY}) qua khoảng cách ${distance}...`);
+              let startX = box.x + 22;
+              let startY = box.y + box.height / 2;
+
+              if (btnLocator) {
+                const btnBox = await btnLocator.boundingBox();
+                if (btnBox) {
+                  startX = btnBox.x + btnBox.width / 2;
+                  startY = btnBox.y + btnBox.height / 2;
+                }
+              }
+
+              const endX = box.x + box.width - 8;
+              const distance = endX - startX;
+
+              console.log(`[Monitor] 🔄 Bắt đầu kéo thanh trượt từ (${Math.round(startX)}, ${Math.round(startY)}) sang (${Math.round(endX)}, ${Math.round(startY)})...`);
               await this.page.mouse.move(startX, startY);
-              await this.page.waitForTimeout(200);
-              await this.page.mouse.down();
               await this.page.waitForTimeout(100);
+              await this.page.mouse.down();
+              await this.page.waitForTimeout(50);
 
               const steps = 30;
               for (let i = 1; i <= steps; i++) {
                 const currentX = startX + (distance * i / steps);
-                const currentY = startY + Math.sin(i / 3) * 2;
+                const currentY = startY + Math.sin(i / 2) * 2;
                 await this.page.mouse.move(currentX, currentY);
-                await this.page.waitForTimeout(15 + Math.random() * 10);
+                await this.page.waitForTimeout(10 + Math.random() * 8);
               }
-              await this.page.waitForTimeout(200);
+              await this.page.waitForTimeout(100);
               await this.page.mouse.up();
               console.log('[Monitor] ✅ Đã thả thanh trượt. Chờ Lazada xác thực token...');
-              await this.page.waitForTimeout(4000);
+              await this.page.waitForTimeout(3000);
+
+              try {
+                const qrPath = path.join(__dirname, '..', 'public', 'login-qr.png');
+                await this.page.screenshot({ path: qrPath });
+              } catch (e) {}
+
               return true;
             }
           }

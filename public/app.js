@@ -197,11 +197,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const qrLoadingText = document.getElementById('qrLoadingText');
   const loginCheckStatus = document.getElementById('loginCheckStatus');
   const btnRefreshQr = document.getElementById('btnRefreshQr');
+  const btnCloseLoginBox = document.getElementById('btnCloseLoginBox');
+  const btnBringBrowser = document.getElementById('btnBringBrowser');
+  const btnAutoSolveCaptcha = document.getElementById('btnAutoSolveCaptcha');
+  const captchaWarningBanner = document.getElementById('captchaWarningBanner');
   let loginPollTimer = null;
 
-  // Bắt đầu giám sát
+  // Bắt đầu giám sát (chỉ chạy khi thực sự đã đăng nhập)
   btnStart.addEventListener('click', async () => {
-    // Kích hoạt AudioContext khi người dùng click
     audioManager.initContext();
     btnStart.disabled = true;
 
@@ -210,6 +213,19 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       if (!data.success) {
         btnStart.disabled = false;
+        if (data.isLoginNeeded) {
+          alert('⚠️ Bạn chưa đăng nhập tài khoản Lazada!\nHãy quét mã QR hoặc đăng nhập trên trình duyệt trước khi bắt đầu giám sát.');
+          loadAndShowQr();
+        } else {
+          alert('Không thể bắt đầu: ' + (data.error || data.message || 'Lỗi không xác định'));
+        }
+      } else {
+        // Đã bắt đầu thành công -> Ẩn khung login nếu đang mở
+        if (loginNoticeBox) loginNoticeBox.style.display = 'none';
+        if (loginPollTimer) {
+          clearInterval(loginPollTimer);
+          loginPollTimer = null;
+        }
       }
     } catch (e) {
       console.error(e);
@@ -221,10 +237,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (loginNoticeBox) loginNoticeBox.style.display = 'block';
     if (qrLoadingText) {
       qrLoadingText.style.display = 'block';
-      qrLoadingText.textContent = 'Đang tải trang đăng nhập Lazada...';
+      qrLoadingText.textContent = 'Đang kết nối tới trang đăng nhập Lazada...';
     }
     if (loginQrImg) loginQrImg.style.display = 'none';
-    if (loginCheckStatus) loginCheckStatus.textContent = '⏳ Đang kết nối tới trang đăng nhập...';
+    if (loginCheckStatus) {
+      loginCheckStatus.textContent = '⏳ Đang tải mã QR hoặc trang đăng nhập...';
+      loginCheckStatus.style.color = '#9a3412';
+    }
 
     try {
       const res = await fetch('/api/monitor/open-login', { method: 'POST' });
@@ -251,53 +270,147 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         const res = await fetch('/api/monitor/check-login');
         const data = await res.json();
+
+        // Cập nhật cảnh báo thanh trượt chống bot
+        if (captchaWarningBanner) {
+          captchaWarningBanner.style.display = data.hasCaptcha ? 'block' : 'none';
+        }
+
+        // Cập nhật ảnh chụp màn hình mới nhất
+        if (data.qrImage && loginQrImg && loginNoticeBox && loginNoticeBox.style.display !== 'none') {
+          loginQrImg.src = data.qrImage;
+          loginQrImg.style.display = 'inline-block';
+          if (qrLoadingText) qrLoadingText.style.display = 'none';
+        }
+
         if (data.loggedIn) {
-          clearInterval(loginPollTimer);
-          loginPollTimer = null;
           if (loginCheckStatus) {
-            loginCheckStatus.innerHTML = '🎉 <strong>ĐÃ ĐĂNG NHẬP THÀNH CÔNG!</strong> Đang tự động quét giỏ hàng...';
+            loginCheckStatus.innerHTML = `🎉 <strong>ĐÃ ĐĂNG NHẬP THÀNH CÔNG!</strong> Tài khoản: <strong>${data.accountName || 'Lazada'}</strong>.<br>👉 Bấm nút <strong>"▶️ BẮT ĐẦU GIÁM SÁT"</strong> để tiến hành quét giỏ hàng.`;
             loginCheckStatus.style.color = '#15803d';
           }
-          setTimeout(() => {
-            if (loginNoticeBox) loginNoticeBox.style.display = 'none';
-          }, 2000);
-
-          systemStatusBadge.className = 'header-status-badge running';
-          systemStatusText.textContent = 'Đang giám sát';
-          btnStart.disabled = true;
-          btnStop.disabled = false;
-
-          fetch('/api/monitor/start', { method: 'POST' }).catch(() => {});
+          // TUYỆT ĐỐI KHÔNG TỰ ĐỘNG ẨN KHUNG ĐĂNG NHẬP HOẶC TỰ ĐỘNG CHẠY
+          // Người dùng chủ động kiểm tra xong rồi bấm nút "Bắt đầu giám sát"
+        } else {
+          if (loginCheckStatus && !data.hasCaptcha) {
+            loginCheckStatus.innerHTML = '⏳ Đang đợi quét mã QR hoặc đăng nhập trên trình duyệt...';
+            loginCheckStatus.style.color = '#9a3412';
+          }
         }
       } catch (e) {}
-    }, 2500);
+    }, 3000);
   }
 
+  // Tương tác chuột trên hình ảnh: Hỗ trợ cả Click và Kéo trượt (Drag)
   if (loginQrImg) {
     loginQrImg.style.cursor = 'crosshair';
-    loginQrImg.title = 'Bấm chuột vào bất kỳ vị trí nào trên hình để tương tác trực tiếp!';
-    loginQrImg.addEventListener('click', async (e) => {
+    loginQrImg.title = 'Nhấn giữ và kéo chuột để gạt thanh trượt chống bot, hoặc click để thao tác!';
+
+    // Chặn kéo hình mặc định của trình duyệt
+    loginQrImg.addEventListener('dragstart', (e) => e.preventDefault());
+
+    let dragStartPos = null;
+
+    loginQrImg.addEventListener('mousedown', (e) => {
       const rect = loginQrImg.getBoundingClientRect();
       const scaleX = loginQrImg.naturalWidth / rect.width;
       const scaleY = loginQrImg.naturalHeight / rect.height;
-      const clickX = Math.round((e.clientX - rect.left) * scaleX);
-      const clickY = Math.round((e.clientY - rect.top) * scaleY);
+      dragStartPos = {
+        x: Math.round((e.clientX - rect.left) * scaleX),
+        y: Math.round((e.clientY - rect.top) * scaleY)
+      };
+    });
 
-      if (loginCheckStatus) loginCheckStatus.textContent = `⏳ Đang bấm tại (${clickX}, ${clickY})...`;
+    loginQrImg.addEventListener('mouseup', async (e) => {
+      if (!dragStartPos) return;
+      const rect = loginQrImg.getBoundingClientRect();
+      const scaleX = loginQrImg.naturalWidth / rect.width;
+      const scaleY = loginQrImg.naturalHeight / rect.height;
+      const endX = Math.round((e.clientX - rect.left) * scaleX);
+      const endY = Math.round((e.clientY - rect.top) * scaleY);
 
+      const dx = Math.abs(endX - dragStartPos.x);
+      const dy = Math.abs(endY - dragStartPos.y);
+
+      if (dx > 25 || dy > 25) {
+        // Thao tác Kéo chuột (Drag)
+        if (loginCheckStatus) loginCheckStatus.textContent = `⏳ Đang kéo chuột từ (${dragStartPos.x}, ${dragStartPos.y}) sang (${endX}, ${endY})...`;
+        try {
+          const res = await fetch('/api/monitor/drag', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              startX: dragStartPos.x,
+              startY: dragStartPos.y,
+              endX: endX,
+              endY: endY
+            })
+          });
+          const data = await res.json();
+          if (data.success && data.qrImage) {
+            loginQrImg.src = data.qrImage;
+            if (loginCheckStatus) loginCheckStatus.textContent = '✅ Đã thực hiện thao tác kéo thanh trượt!';
+          }
+        } catch (err) {
+          if (loginCheckStatus) loginCheckStatus.textContent = 'Lỗi kéo: ' + err.message;
+        }
+      } else {
+        // Thao tác Bấm chuột (Click)
+        if (loginCheckStatus) loginCheckStatus.textContent = `⏳ Đang bấm chuột tại (${endX}, ${endY})...`;
+        try {
+          const res = await fetch('/api/monitor/click', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ x: endX, y: endY })
+          });
+          const data = await res.json();
+          if (data.success && data.qrImage) {
+            loginQrImg.src = data.qrImage;
+            if (loginCheckStatus) loginCheckStatus.textContent = '✅ Đã bấm chuột vào trang!';
+          }
+        } catch (err) {
+          if (loginCheckStatus) loginCheckStatus.textContent = 'Lỗi bấm: ' + err.message;
+        }
+      }
+      dragStartPos = null;
+    });
+  }
+
+  // Nút mở trình duyệt ra màn hình
+  if (btnBringBrowser) {
+    btnBringBrowser.addEventListener('click', async () => {
       try {
-        const res = await fetch('/api/monitor/click', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ x: clickX, y: clickY })
-        });
+        await fetch('/api/monitor/bring-to-front', { method: 'POST' });
+      } catch (e) {}
+    });
+  }
+
+  // Nút tự động kéo thanh trượt chống bot
+  if (btnAutoSolveCaptcha) {
+    btnAutoSolveCaptcha.addEventListener('click', async () => {
+      if (loginCheckStatus) loginCheckStatus.textContent = '⏳ Đang tự động tìm và kéo thanh trượt...';
+      try {
+        const res = await fetch('/api/monitor/solve-captcha', { method: 'POST' });
         const data = await res.json();
-        if (data.success && data.qrImage) {
+        if (data.qrImage && loginQrImg) {
           loginQrImg.src = data.qrImage;
-          if (loginCheckStatus) loginCheckStatus.textContent = '✅ Đã bấm chuột! Hãy kiểm tra nếu mã QR đã hiện.';
+        }
+        if (data.solved) {
+          if (loginCheckStatus) loginCheckStatus.textContent = '✅ Đã tự động kéo thanh trượt thành công!';
+        } else {
+          if (loginCheckStatus) loginCheckStatus.textContent = '⚠️ Không tìm thấy thanh trượt hoặc chưa giải được. Hãy kéo thủ công trên hình!';
         }
       } catch (err) {
-        if (loginCheckStatus) loginCheckStatus.textContent = 'Lỗi bấm: ' + err.message;
+        if (loginCheckStatus) loginCheckStatus.textContent = 'Lỗi: ' + err.message;
+      }
+    });
+  }
+
+  if (btnCloseLoginBox) {
+    btnCloseLoginBox.addEventListener('click', () => {
+      if (loginNoticeBox) loginNoticeBox.style.display = 'none';
+      if (loginPollTimer) {
+        clearInterval(loginPollTimer);
+        loginPollTimer = null;
       }
     });
   }

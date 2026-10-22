@@ -68,17 +68,31 @@
         </div>
 
         <div id="loginNoticeBox" style="display: none; background: #fff7ed; border: 2px solid #ea580c; padding: 14px 18px; border-radius: 10px; margin-bottom: 16px; font-size: 13px; color: #9a3412;">
-          <p style="font-size: 15px;"><strong>📱 QUÉT MÃ QR ĐĂNG NHẬP LAZADA</strong></p>
-          <p style="margin-top: 6px; color: #431407;">Mở ứng dụng Lazada trên điện thoại và quét mã QR bên dưới, hoặc đăng nhập trực tiếp trên cửa sổ trình duyệt Chromium thật dưới thanh Taskbar:</p>
-          <p style="margin-top: 4px; font-size: 12px; color: #c2410c;"><em>💡 MẸO: Bạn có thể bấm chuột trực tiếp vào hình dưới đây để điều khiển cửa sổ đăng nhập!</em></p>
-          <div id="qrImageWrap" style="text-align: center; margin: 12px 0;">
-            <img id="loginQrImg" src="" alt="Mã QR Lazada" style="max-width: 100%; max-height: 280px; border-radius: 8px; border: 2px solid #ea580c; display: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            <p id="qrLoadingText" style="color: #c2410c; font-style: italic;">Đang tải mã QR từ Lazada...</p>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <p style="font-size: 15px; margin: 0;"><strong>📱 ĐĂNG NHẬP TÀI KHOẢN LAZADA</strong></p>
+            <button type="button" id="btnCloseLoginBox" class="btn btn-outline" style="padding: 2px 8px; font-size: 11px;">✕ Đóng</button>
           </div>
-          <p style="margin-top: 6px;"><a href="https://member.lazada.vn/user/login" target="_blank" style="color: #ea580c; font-weight: bold; text-decoration: underline;">👉 Hoặc bấm vào đây để mở tab đăng nhập Lazada trên trình duyệt này</a></p>
-          <div style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed #fdba74; display: flex; justify-content: space-between; align-items: center;">
-            <span id="loginCheckStatus">⏳ Đang đợi bạn quét QR / đăng nhập...</span>
-            <button type="button" id="btnRefreshQr" class="btn btn-outline" style="padding: 4px 10px; font-size: 12px;">🔄 Tải lại QR</button>
+          <p style="margin-top: 6px; color: #431407;">Mở ứng dụng Lazada trên điện thoại và quét mã QR bên dưới, hoặc đăng nhập trực tiếp trên cửa sổ trình duyệt Chromium thật:</p>
+          <p style="margin-top: 4px; font-size: 12px; color: #c2410c;"><em>💡 MẸO: Bạn có thể click chuột HOẶC nhấn giữ kéo chuột trực tiếp trên hình bên dưới để kéo thanh trượt chống bot!</em></p>
+          
+          <div id="captchaWarningBanner" style="display: none; background: #fef08a; border: 1px solid #ca8a04; color: #854d0e; padding: 8px 12px; border-radius: 6px; margin: 8px 0; font-weight: 600;">
+            ⚠️ Phát hiện Lazada yêu cầu kéo thanh trượt chống bot! Bạn có thể nhấn giữ kéo chuột trên hình, hoặc bấm nút "Tự kéo chống bot" bên dưới.
+          </div>
+
+          <div id="qrImageWrap" style="text-align: center; margin: 12px 0;">
+            <img id="loginQrImg" src="" alt="Mã QR Lazada" style="max-width: 100%; max-height: 320px; border-radius: 8px; border: 2px solid #ea580c; display: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); user-select: none;">
+            <p id="qrLoadingText" style="color: #c2410c; font-style: italic;">Đang tải giao diện đăng nhập từ Lazada...</p>
+          </div>
+
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
+            <button type="button" id="btnBringBrowser" class="btn btn-outline" style="padding: 5px 10px; font-size: 12px; background: #f8fafc;">🖥️ Mở cửa sổ Chromium</button>
+            <button type="button" id="btnAutoSolveCaptcha" class="btn btn-outline" style="padding: 5px 10px; font-size: 12px; background: #fef9c3; color: #854d0e; border-color: #facc15;">⚡ Tự kéo chống bot</button>
+            <button type="button" id="btnRefreshQr" class="btn btn-outline" style="padding: 5px 10px; font-size: 12px;">🔄 Tải lại hình</button>
+          </div>
+
+          <p style="margin-top: 4px;"><a href="https://member.lazada.vn/user/login" target="_blank" style="color: #ea580c; font-weight: bold; text-decoration: underline;">👉 Hoặc bấm vào đây để mở tab đăng nhập Lazada trên trình duyệt này</a></p>
+          <div style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed #fdba74;">
+            <span id="loginCheckStatus" style="font-weight: 600;">⏳ Đang đợi bạn quét QR / đăng nhập...</span>
           </div>
         </div>
 

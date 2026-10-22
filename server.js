@@ -69,15 +69,8 @@ app.post('/api/config', (req, res) => {
 // 2. Điều khiển Monitor
 app.post('/api/monitor/start', async (req, res) => {
   try {
-    if (monitor.isRunning && monitor.currentState === 'WAITING_LOGIN') {
-      const loggedIn = await monitor.checkIsLoggedIn();
-      if (loggedIn) {
-        monitor.handleLoginSuccess().catch(e => console.warn(e.message));
-        return res.json({ success: true, message: 'Đã phát hiện đăng nhập và bắt đầu quét giỏ hàng.' });
-      }
-    }
-    monitor.start(req.body);
-    res.json({ success: true, message: 'Đã phát lệnh bắt đầu giám sát.' });
+    const result = await monitor.start(req.body);
+    res.json(result || { success: true, message: 'Đã phát lệnh bắt đầu giám sát.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -301,6 +294,70 @@ app.post('/api/monitor/click', async (req, res) => {
   }
 });
 
+// Endpoint chuyển tiếp thao tác kéo chuột (Drag) từ giao diện Web Dashboard vào trình duyệt Playwright (dùng để kéo thanh trượt chống bot)
+app.post('/api/monitor/drag', async (req, res) => {
+  try {
+    const { startX, startY, endX, endY } = req.body;
+    if (typeof startX !== 'number' || typeof startY !== 'number' || typeof endX !== 'number' || typeof endY !== 'number') {
+      return res.status(400).json({ success: false, error: 'Tọa độ không hợp lệ' });
+    }
+    if (!monitor.page || monitor.page.isClosed()) {
+      return res.status(400).json({ success: false, error: 'Trình duyệt chưa sẵn sàng' });
+    }
+
+    console.log(`[Monitor] 🖱️ Kéo chuột từ (${startX}, ${startY}) sang (${endX}, ${endY})`);
+    await monitor.page.mouse.move(startX, startY);
+    await monitor.page.waitForTimeout(60);
+    await monitor.page.mouse.down();
+    await monitor.page.waitForTimeout(60);
+
+    const steps = 25;
+    for (let i = 1; i <= steps; i++) {
+      const cx = startX + (endX - startX) * (i / steps);
+      const cy = startY + (endY - startY) * (i / steps) + (Math.sin(i / 2) * 2);
+      await monitor.page.mouse.move(cx, cy);
+      await monitor.page.waitForTimeout(12);
+    }
+    await monitor.page.mouse.up();
+    await monitor.page.waitForTimeout(2000);
+
+    const qrPath = path.join(__dirname, 'public', 'login-qr.png');
+    await monitor.page.screenshot({ path: qrPath });
+
+    res.json({ success: true, qrImage: '/login-qr.png?t=' + Date.now() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Endpoint tự động kéo thanh trượt chống bot
+app.post('/api/monitor/solve-captcha', async (req, res) => {
+  try {
+    const solved = await monitor.handleCaptchaIfPresent();
+    const qrPath = path.join(__dirname, 'public', 'login-qr.png');
+    if (monitor.page && !monitor.page.isClosed()) {
+      await monitor.page.screenshot({ path: qrPath });
+    }
+    res.json({ success: true, solved, qrImage: '/login-qr.png?t=' + Date.now() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Endpoint đưa cửa sổ trình duyệt Chromium ra trước màn hình
+app.post('/api/monitor/bring-to-front', async (req, res) => {
+  try {
+    if (monitor.page && !monitor.page.isClosed()) {
+      await monitor.page.bringToFront();
+    }
+    const { exec } = require('child_process');
+    exec('powershell -Command "(New-Object -ComObject WScript.Shell).AppActivate(\'Chromium\'); (New-Object -ComObject WScript.Shell).AppActivate(\'Lazada\')"', () => {});
+    res.json({ success: true, message: 'Đã mở cửa sổ trình duyệt ra màn hình.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Endpoint kiểm tra xem đã đăng nhập thành công chưa
 app.get('/api/monitor/check-login', async (req, res) => {
   try {
@@ -308,37 +365,40 @@ app.get('/api/monitor/check-login', async (req, res) => {
       return res.json({ loggedIn: false });
     }
     const curUrl = monitor.page.url();
-    const userInfo = await monitor.page.evaluate(() => {
+    const loggedIn = await monitor.checkIsLoggedIn();
+
+    // Kiểm tra xem có popup chống bot đang hiển thị không
+    const hasCaptcha = await monitor.page.evaluate(() => {
+      const baxia = document.querySelector('#baxia-dialog-content, .baxia-dialog, div[class*="baxia"], div[id*="nocaptcha"]');
       const text = document.body ? document.body.innerText : '';
-      const cartItemsCount = document.querySelectorAll('.cart-item, [class*="cart-item"], .cart-item-list').length;
-      const hasSelectAll = text.includes('CHỌN TẤT CẢ') || text.includes('Chọn tất cả');
-      const hasAccount = !!document.querySelector('#myAccount, [data-spm*="my_account"], .account-info, [class*="member-name"]') ||
-                          text.includes('TÀI KHOẢN') || text.includes('Xin chào') || text.includes('Quản lý tài khoản');
-      const isStillLogin = text.includes('Đăng nhập / Đăng ký') && text.includes('Bạn chưa thêm sản phẩm');
-      return { cartItemsCount, hasSelectAll, hasAccount, isStillLogin };
-    });
+      return !!baxia || text.includes('Please drag the slider to verify') || text.includes('Please slide to verify');
+    }).catch(() => false);
 
-    let hasAuthCookie = false;
-    try {
-      if (monitor.browserContext) {
-        const cookies = await monitor.browserContext.cookies();
-        hasAuthCookie = cookies.some(c => c.domain.includes('lazada') && (
-          c.name === 'lzd_sid' || c.name === 'x5sec' || c.name === 'user_id' || c.name === 'uc4' || c.name === 'cookie2'
-        ));
-      }
-    } catch (e) {}
-
-    const isCartOrHome = (curUrl.includes('/cart') || curUrl.includes('lazada.vn')) && !curUrl.includes('member/login') && !curUrl.includes('login.lazada.vn');
-    const loggedIn = userInfo.cartItemsCount > 0 || userInfo.hasSelectAll || userInfo.hasAccount || (hasAuthCookie && !curUrl.includes('member/login')) || (isCartOrHome && !userInfo.isStillLogin);
-
-    // Nếu phát hiện đã đăng nhập thành công: tự động chuyển về giỏ hàng và kích hoạt quét
+    let accountName = '';
     if (loggedIn) {
-      if (monitor.currentState === 'WAITING_LOGIN' || !curUrl.includes('/cart')) {
-        monitor.handleLoginSuccess().catch(e => console.warn('[Monitor] Lỗi handleLoginSuccess:', e.message));
-      }
+      accountName = await monitor.page.evaluate(() => {
+        const el = document.querySelector('#myAccount, [data-spm*="my_account"], .account-info, [class*="member-name"], [class*="user-name"]');
+        return el ? el.innerText.trim() : 'Tài khoản Lazada';
+      }).catch(() => 'Tài khoản Lazada');
     }
 
-    res.json({ loggedIn, currentUrl: curUrl, userInfo });
+    let qrImage = null;
+    try {
+      const qrPath = path.join(__dirname, 'public', 'login-qr.png');
+      await monitor.page.screenshot({ path: qrPath });
+      qrImage = '/login-qr.png?t=' + Date.now();
+    } catch (e) {}
+
+    // TUYỆT ĐỐI KHÔNG TỰ ĐỘNG GỌI handleLoginSuccess() Ở ĐÂY NỮA
+    // Đăng nhập tách biệt hoàn toàn với bắt đầu chạy theo yêu cầu người dùng!
+
+    res.json({
+      loggedIn,
+      accountName,
+      hasCaptcha,
+      currentUrl: curUrl,
+      qrImage
+    });
   } catch (err) {
     res.status(500).json({ loggedIn: false, error: err.message });
   }
