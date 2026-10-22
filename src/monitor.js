@@ -1586,62 +1586,100 @@ class LazadaPriceMonitor {
       }
       await itemCb.scrollIntoViewIfNeeded().catch(() => {});
 
-      // BƯỚC 1: Đảm bảo giỏ hàng CHỈ TÍCH CHỌN DUY NHẤT 1 sản phẩm mục tiêu (Không nhấp nháy, không spam API)
+      // BƯỚC 1: Đảm bảo giỏ hàng CHỈ TÍCH CHỌN DUY NHẤT 1 sản phẩm mục tiêu
+      // Chiến lược: Kiểm tra số lượng hiện tại, dùng "CHỌN TẤT CẢ" để toggle nhanh về 0, rồi mới click sản phẩm mục tiêu.
+      // TUYỆT ĐỐI KHÔNG duyệt vòng lặp click từng item (gây spam API dẫn đến P-CART-FLOW-LIMITED và nhấp nháy trang).
+
       const checkoutBtn = this.page.locator('.checkout-order-total-button, button.automation-checkout-order-total-button-button, button:has-text("THANH TOÁN")').first();
       await checkoutBtn.waitFor({ state: 'visible', timeout: 5000 });
       let curText = await checkoutBtn.innerText().catch(() => '');
 
-      // 1. Kiểm tra xem ô "CHỌN TẤT CẢ" có đang tích hay không
-      const isSelectAllChecked = await this.page.evaluate(() => {
-        const selectAll = document.querySelector('.list-header-checkbox input[type="checkbox"], label.list-header-checkbox, [class*="list-header"] .next-checkbox');
-        if (!selectAll) return false;
-        const input = selectAll.tagName === 'INPUT' ? selectAll : selectAll.querySelector('input');
-        return (input && input.checked) || selectAll.classList.contains('checked') || selectAll.getAttribute('aria-checked') === 'true';
-      }).catch(() => false);
+      console.log(`[AutoOrder] 🛒 Số sản phẩm đang được chọn hiện tại: "${curText}"`);
 
-      // Nếu "CHỌN TẤT CẢ" đang tích hoặc đang có nhiều hơn 1 sản phẩm được chọn:
-      if (isSelectAllChecked || (!curText.includes('(0)') && !curText.includes('(1)'))) {
-        console.log('[AutoOrder] 🔄 Đang có nhiều sản phẩm được chọn, thực hiện hủy chọn tất cả bằng nút "CHỌN TẤT CẢ"...');
-        const selectAllLocator = this.page.locator('.list-header-checkbox, label.list-header-checkbox, [class*="list-header"] .next-checkbox').first();
-        if (await selectAllLocator.count() > 0) {
-          if (isSelectAllChecked) {
-            // Đang tích -> Click 1 lần duy nhất để hủy chọn toàn bộ về 0
+      // Nếu đang có nhiều hơn 1 sản phẩm được chọn hoặc đang "CHỌN TẤT CẢ":
+      const hasMoreThanOne = curText && !curText.includes('(0)') && !curText.includes('(1)') && !curText.includes('( 1 )');
+      if (hasMoreThanOne) {
+        console.log('[AutoOrder] ⚠️ Đang có nhiều sản phẩm được chọn. Sử dụng CHỌN TẤT CẢ để reset về 0...');
+
+        // Đọc trạng thái thực của ô CHỌN TẤT CẢ (checked hoặc indeterminate)
+        const selectAllState = await this.page.evaluate(() => {
+          const inp = document.querySelector('.list-header-checkbox input[type="checkbox"], label.list-header-checkbox input[type="checkbox"]');
+          const lbl = document.querySelector('label.list-header-checkbox, .list-header-checkbox');
+          if (!inp && !lbl) return 'none';
+          // indeterminate: một phần được chọn; checked: tất cả được chọn
+          if (inp) {
+            if (inp.indeterminate) return 'indeterminate';
+            if (inp.checked) return 'checked';
+            return 'unchecked';
+          }
+          if (lbl && (lbl.classList.contains('indeterminate') || lbl.getAttribute('aria-checked') === 'mixed')) return 'indeterminate';
+          if (lbl && (lbl.classList.contains('checked') || lbl.getAttribute('aria-checked') === 'true')) return 'checked';
+          return 'unchecked';
+        }).catch(() => 'unknown');
+
+        console.log(`[AutoOrder] Trạng thái ô CHỌN TẤT CẢ: ${selectAllState}`);
+
+        const selectAllLocator = this.page.locator('label.list-header-checkbox, .list-header-checkbox .next-checkbox, .list-header-checkbox').first();
+        const selectAllCount = await selectAllLocator.count();
+
+        if (selectAllCount > 0) {
+          if (selectAllState === 'indeterminate') {
+            // Đang chọn một phần (indeterminate): Click 1 lần để chọn TẤT CẢ, rồi click lần nữa để HỦY TOÀN BỘ về 0
+            console.log('[AutoOrder] Click 1: Chọn tất cả (từ indeterminate)...');
             await selectAllLocator.click({ force: true }).catch(() => {});
-            await this.page.waitForTimeout(600);
+            await this.page.waitForTimeout(800);
+            curText = await checkoutBtn.innerText().catch(() => '');
+            // Chỉ click lần 2 nếu sau lần 1 vẫn còn nhiều hơn 1
+            if (curText && !curText.includes('(0)') && !curText.includes('(1)')) {
+              console.log('[AutoOrder] Click 2: Hủy tất cả về 0...');
+              await selectAllLocator.click({ force: true }).catch(() => {});
+              await this.page.waitForTimeout(800);
+            }
+          } else if (selectAllState === 'checked') {
+            // Đang chọn tất cả: Click 1 lần để hủy toàn bộ về 0
+            console.log('[AutoOrder] Click 1: Hủy chọn tất cả (từ checked)...');
+            await selectAllLocator.click({ force: true }).catch(() => {});
+            await this.page.waitForTimeout(800);
           } else {
-            // Đang chọn một phần -> Click 1 để chọn hết, click 2 để hủy toàn bộ
-            await selectAllLocator.click({ force: true }).catch(() => {});
-            await this.page.waitForTimeout(400);
+            // Trường hợp khác (unchecked nhưng vẫn có nhiều item selected): thử click 2 lần
             await selectAllLocator.click({ force: true }).catch(() => {});
             await this.page.waitForTimeout(600);
+            await selectAllLocator.click({ force: true }).catch(() => {});
+            await this.page.waitForTimeout(800);
           }
         }
+
         curText = await checkoutBtn.innerText().catch(() => '');
+        console.log(`[AutoOrder] Sau khi hủy chọn, nút hiển thị: "${curText}"`);
       }
 
-      // 2. Kiểm tra xem sản phẩm mục tiêu đã được chọn chưa
+      // Sau khi về 0 (hoặc đã là 0/1), tích chọn DUY NHẤT sản phẩm mục tiêu nếu cần
       const isTargetChecked = await itemContainer.evaluate(node => {
         const input = node.querySelector('input[type="checkbox"]');
         const label = node.querySelector('label.cart-item-checkbox, .next-checkbox');
         return (input && input.checked) || (label && label.classList.contains('checked'));
       }).catch(() => false);
 
-      if (!isTargetChecked || curText.includes('(0)')) {
-        console.log('[AutoOrder] ⚡ Click vào ô checkbox để chọn duy nhất sản phẩm mục tiêu...');
+      const isAlreadyOnlyOne = isTargetChecked &&
+        curText && (curText.includes('(1)') || curText.includes('( 1 )'));
+
+      if (!isAlreadyOnlyOne) {
+        console.log('[AutoOrder] ⚡ Click vào ô checkbox để chọn DUY NHẤT sản phẩm mục tiêu...');
         await itemCb.scrollIntoViewIfNeeded().catch(() => {});
         await itemCb.click({ force: true });
 
-        // Chờ Lazada đồng bộ nút THANH TOÁN(1)
-        for (let i = 0; i < 20; i++) {
+        // Chờ nút THANH TOÁN cập nhật lên (1)
+        for (let i = 0; i < 25; i++) {
           await this.page.waitForTimeout(100);
           curText = await checkoutBtn.innerText().catch(() => '');
           if (curText && (curText.includes('(1)') || curText.includes('( 1 )'))) {
+            console.log(`[AutoOrder] ✅ Đã chọn đúng 1 sản phẩm mục tiêu: "${curText}"`);
             break;
           }
         }
-        await this.page.waitForTimeout(300);
+        await this.page.waitForTimeout(200);
       } else {
-        console.log(`[AutoOrder] ⚡ Sản phẩm mục tiêu đã được chọn sẵn (${curText}).`);
+        console.log(`[AutoOrder] ⚡ Sản phẩm mục tiêu đã được chọn sẵn và là DUY NHẤT (${curText}).`);
       }
 
       // BƯỚC 2: Click vào nút THANH TOÁN
