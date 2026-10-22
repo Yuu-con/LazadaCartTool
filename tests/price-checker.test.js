@@ -119,6 +119,24 @@ test('Chống trùng: Giá từ 600.000 giảm xuống 520.000 -> isNewAlert = t
   assert.strictEqual(res.isNewAlert, true);
 });
 
+test('Ưu tiên đặt sản phẩm thấp tiền trước khi có nhiều sản phẩm dưới ngưỡng', () => {
+  const items = [
+    { productName: 'Bàn phím cơ A', currentPrice: 450000 },
+    { productName: 'Bàn phím cơ B', currentPrice: 320000 },
+    { productName: 'Bàn phím cơ C', currentPrice: 390000 },
+    { productName: 'Bàn phím cơ D', currentPrice: null }
+  ];
+  const sorted = [...items].sort((a, b) => {
+    const priceA = (typeof a.currentPrice === 'number' && a.currentPrice > 0) ? a.currentPrice : Infinity;
+    const priceB = (typeof b.currentPrice === 'number' && b.currentPrice > 0) ? b.currentPrice : Infinity;
+    return priceA - priceB;
+  });
+  assert.strictEqual(sorted[0].productName, 'Bàn phím cơ B', 'Sản phẩm 320.000 đ phải được xếp lên đầu tiên');
+  assert.strictEqual(sorted[1].productName, 'Bàn phím cơ C');
+  assert.strictEqual(sorted[2].productName, 'Bàn phím cơ A');
+  assert.strictEqual(sorted[3].productName, 'Bàn phím cơ D', 'Sản phẩm null phải ở cuối cùng');
+});
+
 console.log('----------------------------------------------------');
 console.log(`KẾT QUẢ KIỂM THỬ: ${passCount} Passed, ${failCount} Failed.`);
 

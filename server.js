@@ -271,7 +271,18 @@ app.post('/api/monitor/auto-order', async (req, res) => {
     let itemToOrder = targetItem;
     if (!itemToOrder) {
       const items = await monitor.extractCartItems();
-      itemToOrder = items.find(it => it.currentPrice !== null && it.currentPrice < threshold) || items[0];
+      const candidates = items.filter(it => it.currentPrice !== null && it.currentPrice < threshold);
+      if (candidates.length > 0) {
+        // Ưu tiên sản phẩm có giá thấp nhất trước
+        candidates.sort((a, b) => {
+          const priceA = (typeof a.currentPrice === 'number' && a.currentPrice > 0) ? a.currentPrice : Infinity;
+          const priceB = (typeof b.currentPrice === 'number' && b.currentPrice > 0) ? b.currentPrice : Infinity;
+          return priceA - priceB;
+        });
+        itemToOrder = candidates[0];
+      } else {
+        itemToOrder = items[0];
+      }
     }
     if (!itemToOrder) {
       return res.status(400).json({ success: false, error: 'Không tìm thấy sản phẩm nào để đặt hàng' });
