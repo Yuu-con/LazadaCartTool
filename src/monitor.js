@@ -301,25 +301,31 @@ class LazadaPriceMonitor {
 
     const targetCartUrl = (config.cartUrl && config.cartUrl.trim()) ? config.cartUrl.trim() : LAZADA_CART_URL;
 
+    // Yêu cầu: Trước khi quét giỏ hàng, reload page và thực hiện quét ngay sau khi vừa reload để tránh lỗi treo
     this.emitState({
-      message: `Chu kỳ #${this.cycleCount}: Đang quét các sản phẩm trong giỏ hàng...`
+      message: `Chu kỳ #${this.cycleCount}: Đang tải lại giỏ hàng và quét sản phẩm ngay...`
     });
 
     try {
-      // Đảm bảo trang đang ở giỏ hàng nếu vừa đăng nhập xong ở trang chủ hoặc trang khác
+      // 1. Tải lại trang giỏ hàng ngay trước khi quét để làm mới hoàn toàn DOM & phiên làm việc
       if (this.page && !this.page.isClosed()) {
         const curUrl = this.page.url();
-        if (!curUrl.includes('/cart')) {
+        if (curUrl.includes('/cart')) {
+          console.log(`[Monitor] Chu kỳ #${this.cycleCount}: Tải lại trang giỏ hàng trước khi quét...`);
+          await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(e => {
+            console.warn('[Monitor] Cảnh báo khi tải lại giỏ hàng:', e.message);
+          });
+        } else {
           const loggedIn = await this.checkIsLoggedIn();
           if (loggedIn || (!curUrl.includes('member/login') && !curUrl.includes('login.lazada.vn'))) {
             this.emitState({ message: `Đang điều hướng về giỏ hàng Lazada: ${targetCartUrl}` });
             await this.safeNavigate(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-            await this.page.waitForTimeout(2000);
+            await this.page.waitForTimeout(1000);
           }
         }
       }
 
-      // 1. Kiểm tra trạng thái trang và xác nhận giỏ hàng đã tải hoàn tất
+      // 2. Kiểm tra trạng thái đăng nhập và xác nhận giỏ hàng đã sẵn sàng
       const statusCheck = await this.verifyCartPage();
       if (!statusCheck.ready) {
         this.currentState = statusCheck.isLoginNeeded ? 'WAITING_LOGIN' : 'ERROR';
@@ -327,7 +333,6 @@ class LazadaPriceMonitor {
         if (statusCheck.isLoginNeeded) {
           console.log('[Monitor] Phát hiện chưa đăng nhập! Đang chuẩn bị trang đăng nhập Lazada và mã QR...');
 
-          // Chỉ ghi log lỗi 1 lần khi bắt đầu phiên chờ đăng nhập
           if (!this.isLoginErrorLogged) {
             this.isLoginErrorLogged = true;
             addLogEntry({
@@ -356,7 +361,6 @@ class LazadaPriceMonitor {
             } catch (e) {}
           }
 
-          // Đặt chu kỳ chờ kiểm tra đăng nhập lại sau 10 giây
           this.scheduleNextCycle(10);
           return;
         }
@@ -371,36 +375,35 @@ class LazadaPriceMonitor {
           errorMessage: statusCheck.message
         });
 
-        this.scheduleNextCycle(config.checkIntervalSeconds || 60);
+        this.scheduleNextCycle(config.checkIntervalSeconds || 10);
         return;
       }
 
       // Đã sẵn sàng -> Reset cờ lỗi đăng nhập
       this.isLoginErrorLogged = false;
 
-      // 2. Trích xuất toàn bộ sản phẩm trong giỏ hàng (an toàn, không click mua/sửa số lượng)
+      // 3. Trích xuất toàn bộ sản phẩm hợp lệ trong giỏ hàng NGAY SAU KHI VỪA RELOAD
       const scannedItems = await this.extractCartItems();
 
       if (scannedItems.length === 0) {
         this.emitState({
           scannedCount: 0,
           alertCount: 0,
-          message: `Chu kỳ #${this.cycleCount}: Không tìm thấy sản phẩm nào trong giỏ hàng hoặc không thể lấy dữ liệu.`
+          message: `Chu kỳ #${this.cycleCount}: Giỏ hàng hiện tại trống (0 sản phẩm).`
         });
         addLogEntry({
           cycleId: this.cycleCount,
           productName: 'Hệ thống giỏ hàng',
           threshold: threshold,
-          status: 'ERROR',
-          errorMessage: 'Lỗi: Không tìm thấy sản phẩm nào trong giỏ hàng hoặc không thể lấy dữ liệu giá.'
+          status: 'NORMAL',
+          errorMessage: 'Giỏ hàng đang trống hoặc không có sản phẩm nào khả dụng.'
         });
       } else {
-        // 3. Phân tích giá từng sản phẩm so với ngưỡng
+        // 4. Phân tích giá từng sản phẩm so với ngưỡng
         const newAlertItems = [];
         const currentCycleAlerts = [];
         const logEntriesToSave = [];
 
-        // Nếu ngưỡng thay đổi, làm mới danh sách đã cảnh báo để phát cảnh báo lại
         const currentThreshold = Number(threshold);
         if (this.lastCheckedThreshold !== currentThreshold) {
           console.log(`[Monitor] Ngưỡng cảnh báo thay đổi: ${this.lastCheckedThreshold} -> ${currentThreshold}. Làm mới danh sách cảnh báo.`);
@@ -413,17 +416,16 @@ class LazadaPriceMonitor {
             this.lastProductPrices.set(item.productKey, item.currentPrice);
           }
 
-          // Kiểm tra xem sản phẩm có thỏa mãn điều kiện cảnh báo giá thấp không (< threshold)
           if (item.currentPrice !== null && item.currentPrice < threshold) {
             const lastAlertedPrice = this.lastAlertedPrices.get(item.productKey);
             let isNewAlert = false;
 
             if (lastAlertedPrice === undefined || lastAlertedPrice === null) {
-              isNewAlert = true; // Lần đầu phát hiện sản phẩm có giá dưới ngưỡng
+              isNewAlert = true;
             } else if (item.currentPrice < lastAlertedPrice) {
-              isNewAlert = true; // Giá tiếp tục giảm sâu hơn nữa
+              isNewAlert = true;
             } else if (config.repeatAlertOnSameLowPrice) {
-              isNewAlert = true; // Người dùng bật cho phép lặp lại cảnh báo
+              isNewAlert = true;
             }
 
             if (isNewAlert) {
@@ -454,13 +456,10 @@ class LazadaPriceMonitor {
               newAlertItems.push(item);
             }
           } else if (item.currentPrice !== null && item.currentPrice >= threshold) {
-            // Giá đã tăng trở lại trên ngưỡng -> Xóa khỏi danh sách đã cảnh báo
             this.lastAlertedPrices.delete(item.productKey);
           }
         }
 
-        // Trường hợp 1: Quét giỏ hàng thành công, không có sản phẩm đạt ngưỡng cảnh báo
-        // Mỗi chu kỳ quét chỉ tạo 1 log thông báo kiểm tra thành công (SUCCESS)
         if (currentCycleAlerts.length === 0) {
           if (this.lastSummaryLoggedCycle !== this.cycleCount) {
             this.lastSummaryLoggedCycle = this.cycleCount;
@@ -480,7 +479,6 @@ class LazadaPriceMonitor {
           }
         }
 
-        // Lưu log của chu kỳ này
         if (logEntriesToSave.length > 0) {
           const savedLogs = addLogEntries(logEntriesToSave);
           currentCycleAlerts.forEach(alert => {
@@ -498,45 +496,34 @@ class LazadaPriceMonitor {
             : `Kiểm tra thành công – Chu kỳ #${this.cycleCount} (${scannedItems.length} sản phẩm, không có giá thấp).`
         });
 
-        // 4. Phát cảnh báo nếu có sản phẩm vi phạm ngưỡng mới
+        // 5. Phát cảnh báo Web Audio & Telegram (chạy nền bất đồng bộ, KHÔNG làm trễ tiến trình đặt hàng)
         if (newAlertItems.length > 0) {
-          // Báo cho Web Dashboard phát âm thanh (Web Audio API) tối đa 30s
           this.emitState({
             type: 'TRIGGER_ALERT',
             newAlertItems: newAlertItems,
             allAlerts: currentCycleAlerts
           });
-
-          // Gửi thông báo đến Telegram (Android)
-          this.sendTelegramAlerts(config, newAlertItems, threshold);
+          this.sendTelegramAlerts(config, newAlertItems, threshold).catch(e => {
+            console.error('[Monitor] Lỗi gửi tin Telegram cảnh báo:', e.message);
+          });
         }
 
-        // 5. Tự động đặt hàng nếu tính năng autoOrder được bật:
-        // Đặt hàng cho các sản phẩm dưới ngưỡng mà CHƯA đặt hàng thành công (!this.orderedProductKeys.has)
+        // 6. Yêu cầu quan trọng: "khi phát hiện sản phẩm phải đảm bảo đặt hàng ngay lúc quét xong tất cả sản phẩm"
         if (config.autoOrder !== false && currentCycleAlerts.length > 0) {
           const unpurchasedItems = currentCycleAlerts.filter(item => !this.orderedProductKeys.has(item.productKey));
           if (unpurchasedItems.length > 0) {
             unpurchasedItems.sort((a, b) => (a.currentPrice || 0) - (b.currentPrice || 0));
             const targetItem = unpurchasedItems[0];
-            console.log(`[Monitor] Kích hoạt tự động đặt hàng cho sản phẩm: "${targetItem.productName}" (Giá: ${targetItem.currentPrice?.toLocaleString('vi-VN')} đ)`);
-            await this.performAutoOrder(targetItem, threshold, config);
+            console.log(`[Monitor] ⚡ ĐẶT HÀNG TỨC THÌ CHO SẢN PHẨM: "${targetItem.productName}" (Giá: ${targetItem.currentPrice?.toLocaleString('vi-VN')} đ)`);
+            await this.performAutoOrder(targetItem, threshold, config, 1);
           }
         }
       }
 
-      // 5. Chu kỳ quét hoàn tất -> Tải lại giỏ hàng và lên lịch chu kỳ tiếp theo
+      // Chu kỳ quét hoàn tất -> Không reload ở cuối chu kỳ mà sẽ reload ở ĐẦU chu kỳ kế tiếp để chống treo/stale DOM
       if (!this.isRunning || this.isStopping) return;
 
-      this.currentState = 'RELOADING';
-      this.emitState({
-        message: `Chu kỳ #${this.cycleCount} hoàn tất. Đang tải lại giỏ hàng để cập nhật giá mới...`
-      });
-
-      // Tải lại trang an toàn sau khi quét xong
-      await this.reloadCartPage();
-
-      // Lên lịch chu kỳ kế tiếp
-      this.scheduleNextCycle(config.checkIntervalSeconds || 60);
+      this.scheduleNextCycle(config.checkIntervalSeconds || 10);
 
     } catch (err) {
       console.error(`[Monitor] Lỗi trong chu kỳ #${this.cycleCount}:`, err.message);
@@ -551,9 +538,8 @@ class LazadaPriceMonitor {
         errorMessage: err.message
       });
 
-      // Cơ chế thử lại với khoảng chờ tăng dần khi gặp lỗi mạng/kết nối
       this.retryCount++;
-      const retryDelay = Math.min((config.checkIntervalSeconds || 60) * Math.pow(1.5, this.retryCount), 300);
+      const retryDelay = Math.min((config.checkIntervalSeconds || 10) * Math.pow(1.5, this.retryCount), 60);
       this.scheduleNextCycle(Math.round(retryDelay));
     }
   }
@@ -641,76 +627,57 @@ class LazadaPriceMonitor {
     try {
       if (!this.page || this.page.isClosed()) return;
 
-      console.log(`[Monitor] Bắt đầu cuộn tải sản phẩm. Số lượng kỳ vọng: ${expectedCount !== null ? expectedCount : 'Không xác định'}`);
-      this.emitState({
-        message: `Đang cuộn tải sản phẩm giỏ hàng (${expectedCount ? `Kỳ vọng: ${expectedCount} sản phẩm` : 'Đang cuộn...'})...`
+      if (expectedCount === 0) return;
+
+      // Đếm số lượng sản phẩm hợp lệ hiện có trong DOM trước khi cuộn
+      const initialCount = await this.page.evaluate(() => {
+        return document.querySelectorAll('.cart-item:not(.cart-item-disabled), [id^="item_"]:not(.cart-item-disabled)').length;
       });
 
-      let previousItemCount = 0;
+      if (expectedCount && initialCount >= expectedCount) {
+        console.log(`[Monitor] Đã hiển thị đủ ${initialCount}/${expectedCount} sản phẩm, không cần cuộn trang.`);
+        return;
+      }
+
+      console.log(`[Monitor] Bắt đầu cuộn nhanh tải sản phẩm giỏ hàng (Kỳ vọng: ${expectedCount || 'Tối đa'})...`);
+      let previousCount = initialCount;
       let unchangedRounds = 0;
-      const maxScrollRounds = 60; // Tối đa 60 lần cuộn để tránh treo
+      const maxScrollRounds = 10; // Giới hạn tối đa 10 vòng cuộn nhanh để tối ưu tốc độ tối đa
 
       for (let round = 1; round <= maxScrollRounds; round++) {
-        // Cuộn xuống thêm một đoạn
+        // Cuộn nhanh tức thì 1200px (instant scroll, không smooth để tối đa tốc độ)
         await this.page.evaluate(() => {
-          window.scrollBy({ top: 800, behavior: 'smooth' });
+          window.scrollBy(0, 1200);
         });
 
-        // Chờ 500ms để Lazada fetch dữ liệu lazy load
-        await this.page.waitForTimeout(500);
+        // Chờ ngắn 200ms để Lazada fetch lazy load
+        await this.page.waitForTimeout(200);
 
-        // Đếm số lượng phần tử sản phẩm hiện có trong DOM
         const currentCount = await this.page.evaluate(() => {
-          const nodes = document.querySelectorAll(
-            '.cart-item, [id^="item_"]'
-          );
-          let count = 0;
-          nodes.forEach(n => {
-            if (n.querySelector('.current-price, a.title, .automation-link-from-title-to-prod')) {
-              count++;
-            }
-          });
-          return count || nodes.length;
+          return document.querySelectorAll('.cart-item:not(.cart-item-disabled), [id^="item_"]:not(.cart-item-disabled)').length;
         });
 
         if (expectedCount && currentCount >= expectedCount) {
-          console.log(`[Monitor] Đã nạp đủ ${currentCount}/${expectedCount} sản phẩm sau ${round} lần cuộn!`);
+          console.log(`[Monitor] Đã tải đủ ${currentCount}/${expectedCount} sản phẩm sau ${round} vòng cuộn nhanh!`);
           break;
         }
 
-        if (currentCount === previousItemCount) {
+        if (currentCount === previousCount) {
           unchangedRounds++;
-          // Thử cuộn xuống hẳn đáy trang
-          await this.page.evaluate(() => {
-            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-          });
-          await this.page.waitForTimeout(600);
-
-          // Nếu số lượng không đổi sau 4 lần liên tiếp và đã chạm đáy, dừng lại
-          const isAtBottom = await this.page.evaluate(() => {
-            return (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 100);
-          });
-
-          if (unchangedRounds >= 4 && isAtBottom) {
-            console.log(`[Monitor] Đã chạm đáy trang. Tổng sản phẩm tải được: ${currentCount}`);
+          if (unchangedRounds >= 2) {
             break;
           }
         } else {
           unchangedRounds = 0;
-          previousItemCount = currentCount;
-          if (round % 3 === 0) {
-            this.emitState({
-              message: `Đang cuộn tải giỏ hàng... Đã tải ${currentCount}${expectedCount ? `/${expectedCount}` : ''} sản phẩm.`
-            });
-          }
+          previousCount = currentCount;
         }
       }
 
-      // Cuộn nhẹ lên đầu trang sau khi hoàn tất
+      // Trở lại đầu trang tức thì
       await this.page.evaluate(() => {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        window.scrollTo(0, 0);
       });
-      await this.page.waitForTimeout(800);
+      await this.page.waitForTimeout(50);
     } catch (e) {
       console.warn('[Monitor] Cảnh báo khi cuộn trang:', e.message);
     }
@@ -720,22 +687,58 @@ class LazadaPriceMonitor {
     // 1. Đọc số lượng sản phẩm dự kiến từ thẻ: Chọn tất cả (X sản phẩm)
     const expectedCount = await this.getExpectedItemsCount();
 
-    // 2. Cuộn tải trang liên tục cho đến khi đủ số lượng sản phẩm hoặc chạm đáy
+    // 2. Cuộn tải trang nhanh
     await this.scrollToLoadAllItems(expectedCount);
 
-    // 3. Trích xuất dữ liệu DOM trên context trình duyệt một cách an toàn
+    // 3. Trích xuất dữ liệu DOM trên context trình duyệt một cách an toàn và chính xác
     return await this.page.evaluate(() => {
       const items = [];
 
-      // 1. Quét theo đúng cấu trúc tiêu chuẩn Lazada: .cart-item (hoặc [id^="item_"])
+      // Quét theo đúng cấu trúc tiêu chuẩn Lazada: .cart-item (hoặc [id^="item_"])
       const rawNodes = Array.from(document.querySelectorAll(
         '.cart-item, [id^="item_"]'
       ));
 
-      // Lọc bỏ các phần tử con nằm lồng trong phần tử item khác (ví dụ .cart-item-middle, .cart-item-left)
+      // Lọc bỏ:
+      // - Phần tử con nằm lồng trong phần tử item khác
+      // - Phần tử nằm trong khối gợi ý (recommendations, just-for-you, similar)
+      // - Sản phẩm hết hàng, bị vô hiệu hóa hoặc đã xóa
+      // - Sản phẩm KHÔNG CÓ checkbox hợp lệ (nếu không có checkbox thì không thể mua)
       const itemNodes = rawNodes.filter(node => {
+        if (!node) return false;
         if (node.classList.contains('checkout-shop') || node.classList.contains('list-header') || node.classList.contains('cart-item-list')) return false;
-        return !rawNodes.some(other => other !== node && other.contains(node));
+
+        // Bỏ qua nếu là con của một node item khác
+        if (rawNodes.some(other => other !== node && other.contains(node))) return false;
+
+        // Bỏ qua nếu nằm trong các khối gợi ý của Lazada (recommendations / just for you / similar)
+        if (node.closest('.recommend-list, .cart-recommend, [class*="recommend"], [class*="just-for-you"], [class*="similar"], [data-spm*="recommend"]')) {
+          return false;
+        }
+
+        // Bỏ qua nếu sản phẩm bị vô hiệu hóa / hết hàng / xóa
+        if (node.classList.contains('cart-item-disabled') || node.classList.contains('item-del')) {
+          return false;
+        }
+        if (node.closest('.cart-item-list-disabled, .disabled-items, [class*="unavailable"], [class*="disabled-item"]')) {
+          return false;
+        }
+
+        const textContent = (node.innerText || node.textContent || '').toLowerCase();
+        if (textContent.includes('sản phẩm này tạm thời hết hàng') ||
+            textContent.includes('hết hàng') ||
+            textContent.includes('hàng không có sẵn') ||
+            textContent.includes('đã xóa')) {
+          return false;
+        }
+
+        // Kiểm tra checkbox: sản phẩm hợp lệ trong giỏ hàng bắt buộc phải có checkbox
+        const cb = node.querySelector('input[type="checkbox"]:not([disabled]), .cart-item-checkbox:not(.disabled), .next-checkbox:not(.disabled)');
+        if (!cb) {
+          return false;
+        }
+
+        return true;
       });
 
       if (itemNodes.length > 0) {
@@ -778,7 +781,7 @@ class LazadaPriceMonitor {
           const skuText = skuEl ? ` (${skuEl.textContent.trim()})` : '';
 
           // Lấy Giá hiện tại:
-          // Người dùng yêu cầu: "mục nào có giá đã giảm thì lấy giá đã giảm chứ đừng lấy giá gốc"
+          // Ưu tiên giá đã giảm
           let rawPriceText = '';
           const middleEl = node.querySelector('.cart-item-middle') || node;
 
@@ -816,8 +819,7 @@ class LazadaPriceMonitor {
                 if (priceNum) rawPriceText = priceNum[0];
               }
 
-              // 3. Nếu vẫn chưa có và xuất hiện nhiều hơn 1 giá tiền (ví dụ: giá gốc 1.940.000 và giá giảm 1.043.000):
-              // Lấy giá THẤP HƠN (chính là giá đã giảm!)
+              // 3. Nếu vẫn chưa có và xuất hiện nhiều hơn 1 giá tiền (giá gốc và giá giảm), lấy giá THẤP HƠN
               if (!rawPriceText) {
                 const allPriceMatches = Array.from(middleText.matchAll(/[\d.,]{3,}/g)).map(m => m[0]);
                 if (allPriceMatches.length > 0) {
@@ -842,7 +844,7 @@ class LazadaPriceMonitor {
             }
           }
 
-          // Lấy Số lượng từ input (như trong element: .next-number-picker-input input)
+          // Lấy Số lượng từ input
           const qtyEl = node.querySelector(
             '.next-number-picker-input input, .quantity input, input.number, input[type="text"]'
           );
@@ -862,45 +864,11 @@ class LazadaPriceMonitor {
         });
       }
 
-      // Fallback cơ chế dự phòng: Quét tất cả liên kết sản phẩm và cụm giá lân cận
-      if (items.length === 0) {
-        const productLinks = document.querySelectorAll('a[href*="products/"], a[href*="-i"], a[href*=".html"]');
-        const visitedNames = new Set();
-
-        productLinks.forEach(link => {
-          const text = link.textContent.trim();
-          if (text.length > 5 && !visitedNames.has(text) && !link.closest('.lzd-header') && !link.closest('.lzd-footer')) {
-            visitedNames.add(text);
-            const parent = link.closest('div') || link.parentElement;
-            const container = parent ? (parent.closest('div[class*="item"]') || parent.parentElement) : null;
-            let rawPrice = '';
-
-            if (container) {
-              const priceMatch = container.innerText.match(/₫\s*[\d.,]+|[\d.,]+\s*₫|[\d.,]+\s*VND/i);
-              if (priceMatch) {
-                rawPrice = priceMatch[0];
-              }
-            } else if (parent) {
-              const priceMatch = parent.innerText.match(/₫\s*[\d.,]+|[\d.,]+\s*₫|[\d.,]+\s*VND/i);
-              if (priceMatch) {
-                rawPrice = priceMatch[0];
-              }
-            }
-
-            items.push({
-              productKey: link.href || text,
-              productName: text,
-              productUrl: link.href || '',
-              rawPriceText: rawPrice,
-              quantity: 1
-            });
-          }
-        });
-      }
-
+      // TUYỆT ĐỐI KHÔNG DÙNG FALLBACK QUÉT LIÊN KẾT TOÀN TRANG:
+      // Fallback quét liên kết toàn trang trước đây quét nhầm sản phẩm "Gợi ý / Có thể bạn thích" khi giỏ hàng trống!
       return items;
     })
-.then(rawItems => {
+    .then(rawItems => {
       // Chuyển đổi text giá sang số nguyên VND tại Node.js environment
       return rawItems.map(item => {
         const parsedPrice = parseVNDPrice(item.rawPriceText);
@@ -1141,30 +1109,31 @@ class LazadaPriceMonitor {
   }
 
   /**
-   * Tự động thực hiện chuỗi thao tác mua hàng:
-   * 1. Bỏ chọn tất cả sản phẩm khác để chỉ mua duy nhất sản phẩm đạt điều kiện.
-   * 2. Tích chọn ô dấu tích (checkbox) của sản phẩm mục tiêu (Hình 1).
-   * 3. Chờ tổng tiền cập nhật và bấm nút "THANH TOÁN" (Hình 2).
-   * 4. Chờ chuyển sang giao diện đặt hàng (checkout) và bấm nút "Đặt hàng" (Hình 3).
-   * 5. Ghi nhận log ORDER_PLACED, gửi thông báo Telegram, và điều hướng an toàn về giỏ hàng.
+   * Tự động đặt hàng với tốc độ cao, xử lý ngay lập tức khi phát hiện giá giảm và thử lại tức thì nếu gặp lỗi
    */
   async performAutoOrder(targetItem, threshold, config, attempt = 1) {
+    const MAX_ORDER_ATTEMPTS = 5;
+
     if (this.isOrdering && attempt === 1) {
       console.log('[AutoOrder] Đang có một tiến trình đặt hàng đang chạy, bỏ qua.');
       return;
     }
 
+    if (!this.isRunning || this.isStopping) return;
+
     this.isOrdering = true;
     console.log(`[AutoOrder] ==========================================`);
-    console.log(`[AutoOrder] 🎯 BẮT ĐẦU TỰ ĐỘNG ĐẶT HÀNG CHO SẢN PHẨM: ${targetItem.productName} (Lần thử ${attempt})`);
+    console.log(`[AutoOrder] ⚡ [TỐC ĐỘ CAO] BẮT ĐẦU ĐẶT HÀNG CHO SẢN PHẨM: ${targetItem.productName} (Lần thử ${attempt}/${MAX_ORDER_ATTEMPTS})`);
     console.log(`[AutoOrder] Giá: ${targetItem.currentPrice?.toLocaleString('vi-VN')} đ | Ngưỡng: ${threshold?.toLocaleString('vi-VN')} đ`);
     console.log(`[AutoOrder] ==========================================`);
 
     this.emitState({
-      message: `🚀 Đang tự động đặt hàng sản phẩm: ${targetItem.productName}...`
+      message: `⚡ [Lần thử ${attempt}/${MAX_ORDER_ATTEMPTS}] Đang tự động đặt hàng tức thì: ${targetItem.productName}...`
     });
 
     let onResponseHandler = null;
+    const targetCartUrl = (config.cartUrl && config.cartUrl.trim()) ? config.cartUrl.trim() : LAZADA_CART_URL;
+
     try {
       if (!this.page || this.page.isClosed()) {
         throw new Error('Trình duyệt chưa sẵn sàng hoặc trang đã bị đóng');
@@ -1173,12 +1142,11 @@ class LazadaPriceMonitor {
       // Đảm bảo đang ở trang giỏ hàng
       const curUrl = this.page.url();
       if (!curUrl.includes('/cart')) {
-        const targetCartUrl = (config.cartUrl && config.cartUrl.trim()) ? config.cartUrl.trim() : LAZADA_CART_URL;
-        await this.safeNavigate(targetCartUrl);
-        await this.page.waitForTimeout(2000);
+        await this.page.goto(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await this.page.waitForTimeout(500);
       }
 
-      // Lắng nghe tất cả các response từ API của Lazada để chẩn đoán nguyên nhân lỗi
+      // Lắng nghe response API để phát hiện lỗi từ server Lazada
       onResponseHandler = async (res) => {
         try {
           const u = res.url();
@@ -1187,141 +1155,158 @@ class LazadaPriceMonitor {
             let bodyText = '';
             try { bodyText = (await res.text()).slice(0, 300); } catch (e) {}
             if (status >= 400 || bodyText.includes('false') || bodyText.includes('error') || bodyText.includes('LZD') || bodyText.includes('fail') || bodyText.includes('Lỗi')) {
-              console.log(`[Lazada API Error] Status ${status} | URL: ${u.split('?')[0]}`);
-              console.log(`[Lazada API Body] ${bodyText}`);
+              console.log(`[Lazada API Error] Status ${status} | URL: ${u.split('?')[0]} | Body: ${bodyText}`);
             }
           }
         } catch (e) {}
       };
       this.page.on('response', onResponseHandler);
 
-      // BƯỚC 1: Xử lý checkbox (Hình 1)
-      // 1.1 Kiểm tra nếu có sản phẩm nào khác đang được tích
-      const selectedItemsCount = await this.page.evaluate(() => {
-        const cbs = Array.from(document.querySelectorAll('.cart-item input[type="checkbox"], [id^="item_"] input[type="checkbox"]'));
-        return cbs.filter(cb => cb.checked).length;
-      });
+      // BƯỚC 1: Xử lý checkbox nhanh và chính xác
+      const checkboxStatus = await this.page.evaluate((target) => {
+        const rawNodes = Array.from(document.querySelectorAll('.cart-item, [id^="item_"]')).filter(n => {
+          if (n.closest('.recommend-list, .cart-recommend, [class*="recommend"], [class*="just-for-you"], [class*="similar"]')) return false;
+          if (n.classList.contains('cart-item-disabled') || n.classList.contains('item-del')) return false;
+          return true;
+        });
 
-      const isSelectAllChecked = await this.page.evaluate(() => {
-        const selectAllCb = document.querySelector('.list-header-checkbox input[type="checkbox"], .list-header .next-checkbox input[type="checkbox"]');
-        if (selectAllCb) return selectAllCb.checked || selectAllCb.getAttribute('aria-checked') === 'true';
-        const label = document.querySelector('.list-header-checkbox, label.list-header-checkbox');
-        return label ? label.classList.contains('checked') : false;
-      });
-
-      // Nếu "CHỌN TẤT CẢ" đang tích hoặc có nhiều hơn 1 sản phẩm được chọn: Reset để chỉ chọn duy nhất sản phẩm mục tiêu
-      if (isSelectAllChecked || selectedItemsCount > 1) {
-        console.log('[AutoOrder] Bỏ chọn tất cả để chỉ mua duy nhất sản phẩm mục tiêu...');
-        const selectAllLocator = this.page.locator('.list-header-checkbox, label.list-header-checkbox').first();
-        if (await selectAllLocator.count() > 0) {
-          if (isSelectAllChecked) {
-            await selectAllLocator.click();
-            await this.page.waitForTimeout(1500);
-          } else {
-            await selectAllLocator.click();
-            await this.page.waitForTimeout(1000);
-            await selectAllLocator.click();
-            await this.page.waitForTimeout(1500);
+        let targetNode = null;
+        if (target.itemId) {
+          targetNode = document.getElementById(target.itemId);
+        }
+        if (!targetNode && target.productUrl) {
+          const cleanUrl = target.productUrl.split('?')[0].replace('https://www.lazada.vn', '').replace('http://www.lazada.vn', '');
+          if (cleanUrl.length > 5) {
+            const link = document.querySelector(`.cart-item a[href*="${cleanUrl}"], [id^="item_"] a[href*="${cleanUrl}"]`);
+            if (link) targetNode = link.closest('.cart-item, [id^="item_"]');
           }
         }
+        if (!targetNode && target.productName) {
+          const shortName = target.productName.slice(0, 30).toLowerCase();
+          targetNode = rawNodes.find(n => (n.innerText || '').toLowerCase().includes(shortName));
+        }
+
+        let targetChecked = false;
+        if (targetNode) {
+          const input = targetNode.querySelector('input[type="checkbox"]');
+          const label = targetNode.querySelector('label.cart-item-checkbox, .next-checkbox');
+          targetChecked = (input && (input.checked || input.getAttribute('aria-checked') === 'true')) ||
+                          (label && label.classList.contains('checked'));
+        }
+
+        const allCheckedInputs = rawNodes.flatMap(n => Array.from(n.querySelectorAll('input[type="checkbox"]'))).filter(cb => cb.checked);
+        const selectAllEl = document.querySelector('.list-header-checkbox input[type="checkbox"], .list-header .next-checkbox input[type="checkbox"]');
+        const isSelectAll = selectAllEl ? (selectAllEl.checked || selectAllEl.getAttribute('aria-checked') === 'true') : false;
+
+        return {
+          foundTarget: !!targetNode,
+          targetChecked: !!targetChecked,
+          totalChecked: allCheckedInputs.length,
+          isSelectAll: isSelectAll
+        };
+      }, { itemId: targetItem.itemId, productUrl: targetItem.productUrl, productName: targetItem.productName });
+
+      if (!checkboxStatus.foundTarget) {
+        throw new Error(`Không tìm thấy sản phẩm "${targetItem.productName}" trong giỏ hàng.`);
       }
 
-      // 1.3 Tìm và tích chọn sản phẩm mục tiêu (Hình 1)
-      let itemContainer = null;
-      if (targetItem.itemId) {
-        const byId = this.page.locator(`#${targetItem.itemId}`);
-        if (await byId.count() > 0) itemContainer = byId.first();
-      }
-      if (!itemContainer && targetItem.productUrl) {
-        const cleanUrl = targetItem.productUrl.split('?')[0];
-        const byUrl = this.page.locator(`.cart-item:has(a[href*="${cleanUrl}"]), [id^="item_"]:has(a[href*="${cleanUrl}"])`);
-        if (await byUrl.count() > 0) itemContainer = byUrl.first();
-      }
-      if (!itemContainer && targetItem.productName) {
-        const shortName = targetItem.productName.slice(0, 30);
-        const byText = this.page.locator(`.cart-item, [id^="item_"]`).filter({ hasText: shortName });
-        if (await byText.count() > 0) itemContainer = byText.first();
-      }
-
-      if (!itemContainer) {
-        throw new Error(`Không tìm thấy phần tử HTML của sản phẩm "${targetItem.productName}" trong giỏ hàng.`);
-      }
-
-      // Cuộn tới sản phẩm
-      await itemContainer.scrollIntoViewIfNeeded();
-      await this.page.waitForTimeout(500);
-
-      // Tìm checkbox của sản phẩm (Hình 1)
-      const itemCb = itemContainer.locator('.cart-item-checkbox, label.next-checkbox, input[type="checkbox"]').first();
-      if (await itemCb.count() === 0) {
-        throw new Error(`Không tìm thấy ô dấu tích (checkbox) của sản phẩm "${targetItem.productName}".`);
-      }
-
-      const isTargetChecked = await itemContainer.evaluate(el => {
-        const input = el.querySelector('input[type="checkbox"]');
-        const label = el.querySelector('label.cart-item-checkbox, .next-checkbox');
-        return (input && (input.checked || input.getAttribute('aria-checked') === 'true')) ||
-               (label && label.classList.contains('checked'));
-      });
-
-      if (isTargetChecked) {
-        console.log('[AutoOrder] Ô dấu tích của sản phẩm đã được chọn sẵn -> Bỏ chọn và tích lại để làm mới token giỏ hàng...');
-        await itemCb.click();
-        await this.page.waitForTimeout(1000);
-        await itemCb.click();
-        await this.page.waitForTimeout(1500);
+      // Tối ưu tốc độ: Nếu sản phẩm đã được chọn sẵn và duy nhất, bỏ qua thao tác click checkbox!
+      if (checkboxStatus.targetChecked && (checkboxStatus.totalChecked === 1 || (!checkboxStatus.isSelectAll && checkboxStatus.totalChecked <= 1))) {
+        console.log('[AutoOrder] ⚡ Sản phẩm mục tiêu đã được tích chọn sẵn và duy nhất, không cần thao tác checkbox!');
       } else {
-        console.log('[AutoOrder] ✅ Tiến hành click vào ô dấu tích của sản phẩm (Hình 1)...');
+        // Nếu "CHỌN TẤT CẢ" đang tích hoặc có sản phẩm khác được chọn: Bỏ chọn tất cả nhanh
+        if (checkboxStatus.isSelectAll || checkboxStatus.totalChecked > 1) {
+          console.log('[AutoOrder] Bỏ chọn tất cả để chỉ chọn duy nhất sản phẩm mục tiêu...');
+          const selectAllLocator = this.page.locator('.list-header-checkbox, label.list-header-checkbox').first();
+          if (await selectAllLocator.count() > 0) {
+            await selectAllLocator.click();
+            await this.page.waitForTimeout(150);
+          }
+        }
+
+        // Tích chọn sản phẩm mục tiêu
+        let itemContainer = null;
+        if (targetItem.itemId) {
+          const byId = this.page.locator(`#${targetItem.itemId}`);
+          if (await byId.count() > 0) itemContainer = byId.first();
+        }
+        if (!itemContainer && targetItem.productUrl) {
+          const cleanUrl = targetItem.productUrl.split('?')[0];
+          const byUrl = this.page.locator(`.cart-item:has(a[href*="${cleanUrl}"]), [id^="item_"]:has(a[href*="${cleanUrl}"])`);
+          if (await byUrl.count() > 0) itemContainer = byUrl.first();
+        }
+        if (!itemContainer && targetItem.productName) {
+          const shortName = targetItem.productName.slice(0, 30);
+          const byText = this.page.locator(`.cart-item, [id^="item_"]`).filter({ hasText: shortName });
+          if (await byText.count() > 0) itemContainer = byText.first();
+        }
+
+        if (!itemContainer) {
+          throw new Error(`Không thể xác định selector của sản phẩm "${targetItem.productName}".`);
+        }
+
+        const itemCb = itemContainer.locator('.cart-item-checkbox, label.next-checkbox, input[type="checkbox"]').first();
+        if (await itemCb.count() === 0) {
+          throw new Error(`Không tìm thấy ô checkbox của sản phẩm "${targetItem.productName}".`);
+        }
+
+        console.log('[AutoOrder] ⚡ Click vào ô checkbox của sản phẩm...');
         await itemCb.click();
-        await this.page.waitForTimeout(2000);
+        await this.page.waitForTimeout(150);
       }
 
-      // BƯỚC 2: Click vào nút THANH TOÁN (Hình 2)
+      // BƯỚC 2: Click vào nút THANH TOÁN
       const checkoutBtn = this.page.locator('.checkout-order-total-button, button.automation-checkout-order-total-button-button, button:has-text("THANH TOÁN")').first();
-      await checkoutBtn.waitFor({ state: 'visible', timeout: 10000 });
+      await checkoutBtn.waitFor({ state: 'visible', timeout: 5000 });
 
-      // Chờ cho đến khi nút thanh toán cập nhật số lượng >= 1
-      let checkoutText = await checkoutBtn.innerText();
-      for (let i = 0; i < 15; i++) {
+      // Chờ nhanh (tối đa 2.5s, poll mỗi 60ms) cho đến khi nút thanh toán cập nhật số lượng >= 1
+      let checkoutText = await checkoutBtn.innerText().catch(() => '');
+      for (let i = 0; i < 35; i++) {
         if (checkoutText && !checkoutText.includes('(0)')) break;
-        await this.page.waitForTimeout(500);
-        checkoutText = await checkoutBtn.innerText();
+        await this.page.waitForTimeout(60);
+        checkoutText = await checkoutBtn.innerText().catch(() => '');
       }
 
       if (checkoutText.includes('(0)')) {
         throw new Error('Chưa chọn được sản phẩm: Nút thanh toán vẫn hiển thị THANH TOÁN(0)');
       }
 
-      console.log(`[AutoOrder] ✅ Tiến hành click vào nút "${checkoutText}" (Hình 2)...`);
-      await checkoutBtn.scrollIntoViewIfNeeded();
-      await this.page.waitForTimeout(500);
-      await checkoutBtn.click();
+      console.log(`[AutoOrder] ⚡ Tiến hành click nút "${checkoutText}"...`);
+      await checkoutBtn.click({ force: true });
 
-      // BƯỚC 3: Chờ qua giao diện đặt hàng hoặc xử lý nếu xuất hiện CAPTCHA (Hình 3)
-      console.log('[AutoOrder] Đang chờ chuyển qua giao diện đặt hàng...');
+      // BƯỚC 3: Chờ chuyển sang trang thanh toán (checkout/shipping) với cơ chế re-click chống kẹt
+      console.log('[AutoOrder] Đang chuyển sang trang thanh toán...');
+      let reachedCheckout = false;
 
-      // Đợi chuyển hướng URL
-      for (let i = 0; i < 15; i++) {
-        await this.page.waitForTimeout(1000);
+      for (let i = 0; i < 35; i++) {
+        await this.page.waitForTimeout(120);
         const curCheckoutUrl = this.page.url();
         if (curCheckoutUrl.includes('/checkout') || curCheckoutUrl.includes('shipping') || curCheckoutUrl.includes('punish')) {
+          reachedCheckout = true;
           break;
+        }
+
+        // Nếu sau 1.5s hoặc 3s vẫn ở /cart, bấm lại nút THANH TOÁN ngay lập tức
+        if (i === 12 || i === 24) {
+          if (await checkoutBtn.isVisible().catch(() => false)) {
+            console.log('[AutoOrder] Vẫn ở trang giỏ hàng, re-click nút THANH TOÁN ngay...');
+            await checkoutBtn.click({ force: true }).catch(() => {});
+          }
         }
       }
 
-      // Tự động kiểm tra và xử lý Slide CAPTCHA nếu xuất hiện
+      if (!reachedCheckout) {
+        throw new Error(`Kẹt tại giỏ hàng: Không thể chuyển sang trang thanh toán (${this.page.url()}).`);
+      }
+
+      // Xử lý CAPTCHA nếu xuất hiện
       await this.handleCaptchaIfPresent();
       if (this.page.url().includes('punish')) {
-        await this.page.waitForTimeout(2000);
+        await this.page.waitForTimeout(1000);
         await this.handleCaptchaIfPresent();
       }
 
-      try {
-        await this.page.waitForLoadState('domcontentloaded', { timeout: 15000 });
-      } catch (e) {}
-      await this.page.waitForTimeout(2000);
-
-      // Hàm tìm và click nút "Đặt hàng" màu cam trên trang thanh toán (Hình 3)
+      // BƯỚC 4: Tìm và click nút "Đặt hàng" màu cam trên trang thanh toán với tốc độ cao
       const clickOrangeDatHang = async () => {
         return await this.page.evaluate(() => {
           const all = Array.from(document.querySelectorAll('*'));
@@ -1333,7 +1318,7 @@ class LazadaPriceMonitor {
             if ((text === 'Đặt hàng' || text === 'ĐẶT HÀNG') && (isOrange || el.closest('.checkout-order-total'))) {
               const rect = el.getBoundingClientRect();
               if (rect.width > 50 && rect.height > 20) {
-                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.scrollIntoView({ behavior: 'auto', block: 'center' });
                 el.click();
                 el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                 return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
@@ -1344,49 +1329,35 @@ class LazadaPriceMonitor {
         });
       };
 
-      console.log('[AutoOrder] Tìm kiếm và click nút "Đặt hàng" màu cam (Hình 3)...');
-      const orderWaitDeadline = Date.now() + 35000;
+      console.log('[AutoOrder] ⚡ Tìm kiếm và click nút "Đặt hàng" màu cam...');
+      const orderWaitDeadline = Date.now() + 15000;
       let orderClicked = false;
 
       while (Date.now() < orderWaitDeadline && !orderClicked) {
-        // 1. Kiểm tra màn hình lỗi hệ thống (Page 1 PDF)
+        // Kiểm tra ngay màn hình lỗi hệ thống Lazada
         const hasSystemError = await this.page.evaluate(() => {
           const t = document.body ? document.body.innerText : '';
           return t.includes('lỗi hệ thống') || t.includes('LZD_BUY_RENDER') || t.includes('quay lại giỏ hàng');
         }).catch(() => false);
 
         if (hasSystemError) {
-          console.log(`[AutoOrder] ⚠️ Phát hiện màn hình lỗi hệ thống Lazada ("vui lòng quay lại giỏ hàng")...`);
-          if (attempt < 10) {
-            console.log(`[AutoOrder] 🔄 Tự động quay về giỏ hàng để tạo lại phiên thanh toán (Lần thử ${attempt + 1}/10)...`);
-            const targetCartUrl = (config.cartUrl && config.cartUrl.trim()) ? config.cartUrl.trim() : LAZADA_CART_URL;
-            await this.page.goto(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
-            await this.page.waitForTimeout(2500);
-            return await this.performAutoOrder(targetItem, threshold, config, attempt + 1);
-          } else {
-            try {
-              const errPath = path.join(__dirname, '..', 'public', 'debug-order-error.png');
-              await this.page.screenshot({ path: errPath, fullPage: true });
-            } catch (e) {}
-            throw new Error('Lazada báo lỗi hệ thống trên trang thanh toán: "Xin lỗi, đã có lỗi hệ thống xảy ra. Bạn vui lòng quay lại giỏ hàng và tiến hành thanh toán."');
-          }
+          throw new Error('Lỗi hệ thống Lazada trên trang thanh toán ("quay lại giỏ hàng").');
         }
 
-        // 2. Thử click nút Đặt hàng màu cam
         const clickRes = await clickOrangeDatHang();
         if (clickRes.found) {
-          console.log(`[AutoOrder] ✅ Đã tìm thấy và click nút "Đặt hàng" tại tọa độ (${clickRes.x}, ${clickRes.y})!`);
+          console.log(`[AutoOrder] ⚡ ĐÃ CLICK NÚT "ĐẶT HÀNG" TẠI (${clickRes.x}, ${clickRes.y})!`);
           orderClicked = true;
           break;
         }
 
-        // 3. Ẩn widget chat nếu che khuất
+        // Ẩn widget chat nếu che khuất
         await this.page.evaluate(() => {
           const chatMin = document.querySelector('.im-app__cont-minimize, [class*="im-app"], [class*="chat-widget"]');
           if (chatMin) chatMin.style.display = 'none';
         }).catch(() => {});
 
-        await this.page.waitForTimeout(1000);
+        await this.page.waitForTimeout(80);
       }
 
       if (!orderClicked) {
@@ -1394,31 +1365,25 @@ class LazadaPriceMonitor {
           const errPath = path.join(__dirname, '..', 'public', 'debug-order-error.png');
           await this.page.screenshot({ path: errPath, fullPage: true });
         } catch (scErr) {}
-        throw new Error(`Timeout 35s: Không tìm thấy nút "Đặt hàng" trên trang thanh toán (${this.page.url()}).`);
+        throw new Error(`Timeout 15s: Không tìm thấy nút "Đặt hàng" trên trang thanh toán (${this.page.url()}).`);
       }
 
-      // Đã click lần 1 -> Chờ phản hồi hoặc kiểm tra Slide CAPTCHA
-      console.log('[AutoOrder] Chờ 4s phản hồi sau khi bấm Đặt hàng...');
-      await this.page.waitForTimeout(4000);
-
-      // Nếu xuất hiện Slide CAPTCHA -> giải mã và bấm lại lần 2
+      // Đã click Đặt hàng -> Kiểm tra phản hồi & CAPTCHA
+      await this.page.waitForTimeout(1500);
       const hadSlider = await this.handleCaptchaIfPresent();
       if (hadSlider) {
-        console.log('[AutoOrder] Đã giải CAPTCHA! Chờ 3s để cập nhật token bảo mật...');
-        await this.page.waitForTimeout(3000);
-
+        console.log('[AutoOrder] Đã giải CAPTCHA! Bấm lại nút "Đặt hàng" lần 2...');
+        await this.page.waitForTimeout(1500);
         if (this.page.url().includes('shipping') || this.page.url().includes('checkout')) {
-          console.log('[AutoOrder] Vẫn ở trang thanh toán sau khi giải CAPTCHA. Bấm nút "Đặt hàng" lần 2 với token đã xác thực...');
           await clickOrangeDatHang();
-          await this.page.waitForTimeout(3000);
+          await this.page.waitForTimeout(1500);
         }
       }
 
-      console.log('[AutoOrder] Đang theo dõi phản hồi đơn hàng và cổng thanh toán MoMo (30s)...');
-
-      // XỬ LÝ CỔNG THANH TOÁN MOMO (Page 2 & Page 3 PDF)
+      // BƯỚC 5: Xử lý cổng thanh toán MoMo
+      console.log('[AutoOrder] Theo dõi cổng thanh toán MoMo hoặc xác nhận tạo đơn...');
       let momoPage = null;
-      const momoWaitDeadline = Date.now() + 30000;
+      const momoWaitDeadline = Date.now() + 15000;
 
       while (Date.now() < momoWaitDeadline && !momoPage) {
         const pages = this.browserContext ? this.browserContext.pages() : [this.page];
@@ -1446,25 +1411,20 @@ class LazadaPriceMonitor {
         }
 
         if (momoPage) break;
-        // Kiểm tra thêm CAPTCHA nếu xuất hiện trong thời gian chờ
         await this.handleCaptchaIfPresent();
-        await this.page.waitForTimeout(1000);
+        await this.page.waitForTimeout(200);
       }
 
       if (momoPage) {
-        console.log(`[AutoOrder] 📱 Phát hiện Cổng thanh toán MoMo tại URL: ${momoPage.url()}`);
-        this.emitState({ message: '📱 Đang xử lý Cổng thanh toán MoMo (Quay về -> Hủy phiên)...' });
-        await momoPage.waitForLoadState('domcontentloaded').catch(() => {});
-        await momoPage.waitForTimeout(2000);
+        console.log(`[AutoOrder] 📱 Phát hiện Cổng thanh toán MoMo tại: ${momoPage.url()}`);
+        this.emitState({ message: '📱 Đang xử lý Cổng MoMo (Quay về -> Hủy phiên)...' });
 
         try {
           const momoPath = path.join(__dirname, '..', 'public', 'debug-momo-qr.png');
           await momoPage.screenshot({ path: momoPath });
-          console.log('[AutoOrder] Đã chụp ảnh lưu giao diện MoMo QR tại:', momoPath);
         } catch (e) {}
 
-        // BƯỚC A: Tìm và click nút / liên kết "Quay về" (Page 2 PDF)
-        console.log('[AutoOrder] Tìm kiếm nút "Quay về" trên trang MoMo...');
+        // Bấm Quay về trên MoMo
         const backBtnSelectors = [
           'button:has-text("Quay về")',
           'a:has-text("Quay về")',
@@ -1480,8 +1440,7 @@ class LazadaPriceMonitor {
         for (const sel of backBtnSelectors) {
           try {
             const loc = momoPage.locator(sel).first();
-            if (await loc.isVisible({ timeout: 2000 }).catch(() => false)) {
-              console.log(`[AutoOrder] ✅ Tìm thấy nút Quay về với selector "${sel}", tiến hành click...`);
+            if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
               await loc.click({ force: true });
               backBtnClicked = true;
               break;
@@ -1490,7 +1449,7 @@ class LazadaPriceMonitor {
         }
 
         if (!backBtnClicked) {
-          backBtnClicked = await momoPage.evaluate(() => {
+          await momoPage.evaluate(() => {
             const elements = Array.from(document.querySelectorAll('a, button, span, div, p'));
             for (const el of elements) {
               const text = (el.innerText || el.textContent || '').trim();
@@ -1501,18 +1460,11 @@ class LazadaPriceMonitor {
             }
             return false;
           }).catch(() => false);
-          if (backBtnClicked) console.log('[AutoOrder] ✅ Đã click nút Quay về qua evaluate.');
         }
 
-        await momoPage.waitForTimeout(2000);
+        await momoPage.waitForTimeout(500);
 
-        // BƯỚC B: Chờ modal "Hủy phiên liên kết dịch vụ" xuất hiện và click "HỦY PHIÊN" (Page 3 PDF)
-        console.log('[AutoOrder] Đang tìm nút "HỦY PHIÊN" trong modal xác nhận hủy...');
-        try {
-          const modalPath = path.join(__dirname, '..', 'public', 'debug-momo-cancel-modal.png');
-          await momoPage.screenshot({ path: modalPath });
-        } catch (e) {}
-
+        // Bấm HỦY PHIÊN trong modal
         const cancelSessionSelectors = [
           'button:has-text("HỦY PHIÊN")',
           'button:has-text("Hủy phiên")',
@@ -1530,8 +1482,7 @@ class LazadaPriceMonitor {
         for (const sel of cancelSessionSelectors) {
           try {
             const loc = momoPage.locator(sel).first();
-            if (await loc.isVisible({ timeout: 2000 }).catch(() => false)) {
-              console.log(`[AutoOrder] ✅ Tìm thấy nút HỦY PHIÊN với selector "${sel}", tiến hành click...`);
+            if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
               await loc.click({ force: true });
               cancelBtnClicked = true;
               break;
@@ -1540,7 +1491,7 @@ class LazadaPriceMonitor {
         }
 
         if (!cancelBtnClicked) {
-          cancelBtnClicked = await momoPage.evaluate(() => {
+          await momoPage.evaluate(() => {
             const elements = Array.from(document.querySelectorAll('button, a, div, span'));
             for (const el of elements) {
               const text = (el.innerText || el.textContent || '').trim();
@@ -1551,11 +1502,10 @@ class LazadaPriceMonitor {
             }
             return false;
           }).catch(() => false);
-          if (cancelBtnClicked) console.log('[AutoOrder] ✅ Đã click nút HỦY PHIÊN qua evaluate.');
         }
 
         console.log('[AutoOrder] ✅ Đã bấm HỦY PHIÊN trên MoMo.');
-        await momoPage.waitForTimeout(3000);
+        await momoPage.waitForTimeout(1000);
 
         if (momoPage !== this.page && !momoPage.isClosed()) {
           try {
@@ -1563,29 +1513,35 @@ class LazadaPriceMonitor {
           } catch (e) {}
         }
       } else {
-        console.log('[AutoOrder] Không phát hiện giao diện MoMo QR (đơn hàng có thể đã được tạo trực tiếp).');
-        await this.page.waitForTimeout(2000);
+        console.log('[AutoOrder] Đơn hàng đã được tạo trực tiếp.');
+        await this.page.waitForTimeout(1000);
       }
 
-      // BƯỚC C: KIỂM TRA XÁC THỰC GIỎ HÀNG THỰC TẾ (Page 3 & 4 PDF)
+      // BƯỚC 6: KIỂM TRA XÁC THỰC GIỎ HÀNG THỰC TẾ
       console.log('[AutoOrder] 🔍 Điều hướng về giỏ hàng để kiểm tra xác thực đơn hàng...');
       this.emitState({ message: '🔍 Đang kiểm tra giỏ hàng để xác thực đơn hàng...' });
-      const targetCartUrl = (config.cartUrl && config.cartUrl.trim()) ? config.cartUrl.trim() : LAZADA_CART_URL;
-      await this.page.goto(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-      await this.page.waitForTimeout(3000);
+      await this.page.goto(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await this.page.waitForTimeout(1000);
 
       try {
         const postOrderCartPath = path.join(__dirname, '..', 'public', 'debug-post-order-cart.png');
         await this.page.screenshot({ path: postOrderCartPath });
-        console.log('[AutoOrder] Đã chụp ảnh lưu giỏ hàng sau khi đặt hàng tại:', postOrderCartPath);
       } catch (e) {}
 
-      // Hàm kiểm tra xem sản phẩm còn nằm trong giỏ hàng hay không
+      // Hàm kiểm tra xem sản phẩm còn nằm trong giỏ hàng hay không (chỉ xét sản phẩm khả dụng)
       const checkItemStillInCart = async () => {
         return await this.page.evaluate((target) => {
+          const rawNodes = Array.from(document.querySelectorAll('.cart-item, [id^="item_"]'));
+          const activeNodes = rawNodes.filter(node => {
+            if (node.closest('.recommend-list, .cart-recommend, [class*="recommend"], [class*="just-for-you"], [class*="similar"]')) return false;
+            if (node.classList.contains('cart-item-disabled') || node.classList.contains('item-del')) return false;
+            if (node.closest('.cart-item-list-disabled, .disabled-items, [class*="unavailable"], [class*="disabled-item"]')) return false;
+            return true;
+          });
+
           // 1. Kiểm tra theo Item ID nếu có
           if (target.itemId) {
-            const el = document.getElementById(target.itemId);
+            const el = activeNodes.find(n => n.id === target.itemId);
             if (el && (el.innerText || '').length > 5) return true;
           }
 
@@ -1593,18 +1549,16 @@ class LazadaPriceMonitor {
           if (target.productUrl) {
             const cleanUrl = target.productUrl.split('?')[0].replace('https://www.lazada.vn', '').replace('http://www.lazada.vn', '');
             if (cleanUrl.length > 5) {
-              const link = document.querySelector(`.cart-item a[href*="${cleanUrl}"], [id^="item_"] a[href*="${cleanUrl}"]`);
-              if (link) return true;
+              const matched = activeNodes.some(n => !!n.querySelector(`a[href*="${cleanUrl}"]`));
+              if (matched) return true;
             }
           }
 
           // 3. Kiểm tra theo tên sản phẩm (30 ký tự đầu tiên)
           if (target.productName) {
             const shortName = target.productName.slice(0, 30).toLowerCase();
-            const titles = Array.from(document.querySelectorAll('.cart-item a.title, .cart-item .automation-link-from-title-to-prod, [id^="item_"] a.title, .cart-item [class*="title"]'));
-            for (const t of titles) {
-              if ((t.textContent || '').toLowerCase().includes(shortName)) return true;
-            }
+            const matched = activeNodes.some(n => (n.innerText || '').toLowerCase().includes(shortName));
+            if (matched) return true;
           }
 
           return false;
@@ -1612,22 +1566,19 @@ class LazadaPriceMonitor {
       };
 
       let isStillInCart = await checkItemStillInCart();
-
-      // Nếu vẫn còn, chờ 3 giây và reload lại giỏ hàng một lần nữa để tránh cache
       if (isStillInCart) {
-        console.log('[AutoOrder] ⚠️ Sản phẩm vẫn hiển thị trong giỏ hàng, tải lại giỏ hàng sau 3 giây để xác minh lại...');
-        await this.page.waitForTimeout(3000);
-        await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
-        await this.page.waitForTimeout(3000);
+        console.log('[AutoOrder] ⚠️ Sản phẩm vẫn hiển thị trong giỏ hàng, tải lại giỏ hàng sau 1 giây để xác minh lại...');
+        await this.page.waitForTimeout(1000);
+        await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await this.page.waitForTimeout(1000);
         isStillInCart = await checkItemStillInCart();
       }
 
       if (isStillInCart) {
-        console.error(`[AutoOrder] ❌ XÁC THỰC THẤT BẠI: Sản phẩm "${targetItem.productName}" vẫn còn trong giỏ hàng sau khi thao tác!`);
-        throw new Error('Sản phẩm vẫn còn trong giỏ hàng sau khi thực hiện đặt hàng & hủy phiên MoMo. Đơn hàng chưa được tạo thành công.');
+        throw new Error(`Sản phẩm "${targetItem.productName}" vẫn còn trong giỏ hàng sau khi thao tác đặt hàng.`);
       }
 
-      console.log(`[AutoOrder] 🎉 XÁC THỰC THÀNH CÔNG: Sản phẩm "${targetItem.productName}" đã biến mất khỏi giỏ hàng! Đơn hàng đã đặt thành công.`);
+      console.log(`[AutoOrder] 🎉 XÁC THỰC THÀNH CÔNG: Sản phẩm "${targetItem.productName}" đã rời khỏi giỏ hàng! Đơn hàng đã đặt thành công.`);
       this.orderedProductKeys.add(targetItem.productKey);
 
       // Ghi log đơn đặt hàng
@@ -1642,7 +1593,7 @@ class LazadaPriceMonitor {
         isNewAlert: true,
         audioStatus: 'PLAYING',
         telegramStatus: config.telegram?.enabled ? 'PENDING' : 'DISABLED',
-        errorMessage: `Tự động đặt hàng thành công! Đã xử lý MoMo và xác nhận sản phẩm đã được thanh toán khỏi giỏ hàng.`
+        errorMessage: `Tự động đặt hàng thành công! Đã xử lý thanh toán và xác nhận sản phẩm đã được mua khỏi giỏ hàng.`
       });
 
       // Gửi thông báo Telegram
@@ -1664,12 +1615,31 @@ class LazadaPriceMonitor {
       });
 
     } catch (err) {
-      console.error('[AutoOrder] ❌ Lỗi trong quá trình tự động đặt hàng:', err.message);
+      console.error(`[AutoOrder] ❌ Lỗi đặt hàng ở lần thử ${attempt}/${MAX_ORDER_ATTEMPTS}: ${err.message}`);
+
+      // YÊU CẦU QUAN TRỌNG: "nếu gặp lỗi phải thao tác đặt lại ngay lập tức"
+      if (attempt < MAX_ORDER_ATTEMPTS && this.isRunning && !this.isStopping) {
+        console.log(`[AutoOrder] 🔄 THAO TÁC ĐẶT LẠI NGAY LẬP TỨC (Lần thử ${attempt + 1}/${MAX_ORDER_ATTEMPTS})...`);
+        this.emitState({
+          message: `⚠️ Lỗi: ${err.message}. Đang đặt lại ngay lập tức (Lần ${attempt + 1}/${MAX_ORDER_ATTEMPTS})...`
+        });
+
+        // Nhanh chóng đưa trang về giỏ hàng để thao tác lại ngay lập tức
+        try {
+          await this.page.goto(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch (e) {}
+
+        // GỌI ĐẶT LẠI NGAY LẬP TỨC
+        return await this.performAutoOrder(targetItem, threshold, config, attempt + 1);
+      }
+
+      // Đã thử hết số lần tối đa mà vẫn thất bại
+      console.error(`[AutoOrder] ❌ Đã thử ${MAX_ORDER_ATTEMPTS} lần thất bại. Ghi nhận lỗi và báo cáo.`);
       try {
         const errPath = path.join(__dirname, '..', 'public', 'debug-order-error.png');
         await this.page.screenshot({ path: errPath, fullPage: true });
-        console.log('[AutoOrder] Đã chụp ảnh lưu lỗi tại:', errPath);
       } catch (scErr) {}
+
       addLogEntry({
         cycleId: this.cycleCount,
         productName: `[LỖI ĐẶT HÀNG] ${targetItem.productName}`,
@@ -1681,21 +1651,19 @@ class LazadaPriceMonitor {
         isNewAlert: false,
         audioStatus: '—',
         telegramStatus: config.telegram?.enabled ? 'PENDING' : 'DISABLED',
-        errorMessage: `Lỗi đặt hàng tự động: ${err.message}`
+        errorMessage: `Lỗi đặt hàng tự động sau ${MAX_ORDER_ATTEMPTS} lần thử: ${err.message}`
       });
 
       if (config.telegram?.enabled && config.telegram?.botToken && config.telegram?.chatId) {
         const errorMsg = `⚠️ <b>LỖI TỰ ĐỘNG ĐẶT HÀNG LAZADA</b>\n\n` +
           `• <b>Sản phẩm:</b> ${targetItem.productName}\n` +
-          `• <b>Lỗi:</b> ${err.message}\n` +
+          `• <b>Lỗi:</b> Đã thử ${MAX_ORDER_ATTEMPTS} lần nhưng thất bại: ${err.message}\n` +
           `• <b>Thời điểm:</b> ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}`;
         sendTelegramMessage(config.telegram.botToken, config.telegram.chatId, errorMsg).catch(() => {});
       }
 
-      // Điều hướng lại giỏ hàng để phục hồi chu kỳ quét tiếp theo
       try {
-        const targetCartUrl = (config.cartUrl && config.cartUrl.trim()) ? config.cartUrl.trim() : LAZADA_CART_URL;
-        await this.page.goto(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+        await this.page.goto(targetCartUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
       } catch (e) {}
     } finally {
       try {
