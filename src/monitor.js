@@ -1175,6 +1175,10 @@ class LazadaPriceMonitor {
 
       // 1. Kiểm tra nhanh xem trên trang hoặc iframe có xuất hiện dấu hiệu chống bot không
       let hasCaptcha = await this.page.evaluate(() => {
+        const mask = document.querySelector('.baxia-dialog-mask, .baxia-dialog, #baxia-dialog-content');
+        if (mask && (mask.offsetWidth > 0 || mask.offsetHeight > 0 || window.getComputedStyle(mask).display !== 'none')) {
+          return true;
+        }
         const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
         if (bodyText.includes('please drag the slider') ||
             bodyText.includes('please slide to verify') ||
@@ -1224,104 +1228,109 @@ class LazadaPriceMonitor {
         message: '⚠️ Phát hiện popup chống bot Lazada. Đang tự động kéo thanh trượt xác minh...'
       });
 
-      // 2. Lấy tọa độ chính xác của thanh trượt và nút kéo (từ page chính hoặc trong frame)
-      let sliderCoords = null;
+      // Hàm tìm tọa độ chính xác của thanh trượt bên trong 1 document cụ thể
+      const findSliderCoords = () => {
+        const scope = document.querySelector('#baxia-dialog-content, .baxia-dialog') || document;
+        const all = Array.from(scope.querySelectorAll('*'));
 
-      // Thử tìm trên main page trước
-      sliderCoords = await this.page.evaluate(() => {
-        const all = Array.from(document.querySelectorAll('*'));
-        let track = null;
-        for (const el of all) {
+        // 1. Tìm nút trượt (draggable button >>)
+        let btn = null;
+        const btnCandidates = all.filter(el => {
+          const r = el.getBoundingClientRect();
+          if (r.width < 15 || r.width > 90 || r.height < 15 || r.height > 90) return false;
           const t = (el.innerText || el.textContent || '').trim();
-          if (t.includes('slide to verify') || t.includes('drag the slider') || t.includes('trượt để xác minh') || t.includes('kéo thanh trượt')) {
-            const r = el.getBoundingClientRect();
-            if (r.width > 80 && r.height > 15) {
-              track = el.closest('div[class*="scale"], #nc_1_wrapper, div') || el;
+          const cls = (typeof el.className === 'string' ? el.className : '');
+          const id = el.id || '';
+          return t === '>>' || t === '»' || t === '>' ||
+                 cls.includes('btn_slide') || cls.includes('nc_iconfont') || cls.includes('handler') ||
+                 id.includes('n1z') || cls.includes('slider-btn');
+        });
+
+        if (btnCandidates.length > 0) {
+          btnCandidates.sort((a, b) => {
+            const ra = a.getBoundingClientRect();
+            const rb = b.getBoundingClientRect();
+            return (ra.width * ra.height) - (rb.width * rb.height);
+          });
+          btn = btnCandidates[0];
+        }
+
+        // 2. Tìm rãnh trượt (pill track: rộng 150-480px, cao 25-80px)
+        let track = null;
+        const trackCandidates = all.filter(el => {
+          const r = el.getBoundingClientRect();
+          if (r.width < 150 || r.width > 480 || r.height < 25 || r.height > 80) return false;
+          const t = (el.innerText || el.textContent || '').trim();
+          const cls = (typeof el.className === 'string' ? el.className : '');
+          const id = el.id || '';
+          if (t.includes('slide to verify') || t.includes('drag the slider') || t.includes('trượt') || t.includes('kéo') ||
+              cls.includes('nc_scale') || cls.includes('scale') || cls.includes('track') || id.includes('nc_1_wrapper')) {
+            return true;
+          }
+          if (btn && el.contains(btn) && el !== btn) return true;
+          return false;
+        });
+
+        if (trackCandidates.length > 0) {
+          trackCandidates.sort((a, b) => {
+            const ra = a.getBoundingClientRect();
+            const rb = b.getBoundingClientRect();
+            return (ra.width * ra.height) - (rb.width * rb.height);
+          });
+          track = trackCandidates[0];
+        }
+
+        if (!track && btn) {
+          let p = btn.parentElement;
+          while (p && p !== document.body) {
+            const r = p.getBoundingClientRect();
+            if (r.width >= 150 && r.width <= 480 && r.height >= 25 && r.height <= 85) {
+              track = p;
               break;
             }
+            p = p.parentElement;
           }
         }
 
-        if (!track) {
-          track = document.querySelector('#nc_1_wrapper, .nc_scale, div[class*="nc_scale"], #baxia-dialog-content .nc_scale, .baxia-dialog div');
+        if (!btn && track) {
+          const children = Array.from(track.querySelectorAll('*'));
+          for (const c of children) {
+            const r = c.getBoundingClientRect();
+            if (r.width >= 20 && r.width <= 75 && r.height >= 20 && r.height <= 70) {
+              btn = c;
+              break;
+            }
+          }
         }
 
         if (!track) return null;
 
-        const trackRect = track.getBoundingClientRect();
-        if (trackRect.width < 80 || trackRect.height < 15) return null;
+        const tRect = track.getBoundingClientRect();
+        const bRect = btn ? btn.getBoundingClientRect() : null;
 
-        // Tìm nút trượt >>
-        let btn = track.querySelector('.btn_slide, [class*="btn_slide"], #nc_1_n1z, span[id*="_n1z"], .nc_iconfont');
-        if (!btn) {
-          for (const el of track.querySelectorAll('*')) {
-            const t = (el.innerText || el.textContent || '').trim();
-            if (t === '>>' || t === '»') {
-              btn = el;
-              break;
-            }
-          }
-        }
+        const startX = bRect ? (bRect.left + bRect.width / 2) : (tRect.left + 25);
+        const startY = bRect ? (bRect.top + bRect.height / 2) : (tRect.top + tRect.height / 2);
+        const endX = tRect.left + tRect.width + 15;
 
-        let startX = trackRect.left + 24;
-        let startY = trackRect.top + trackRect.height / 2;
-
-        if (btn) {
-          const btnRect = btn.getBoundingClientRect();
-          if (btnRect.width > 0 && btnRect.height > 0) {
-            startX = btnRect.left + btnRect.width / 2;
-            startY = btnRect.top + btnRect.height / 2;
-          }
-        }
-
-        const endX = trackRect.left + trackRect.width + 10;
         return {
           startX,
           startY,
           endX,
-          distance: endX - startX
+          distance: endX - startX,
+          trackWidth: tRect.width,
+          trackHeight: tRect.height
         };
-      }).catch(() => null);
+      };
+
+      // 2. Lấy tọa độ thanh trượt
+      let sliderCoords = await this.page.evaluate(findSliderCoords).catch(() => null);
 
       // Nếu chưa tìm thấy trên main page, tìm trong các child frames
       if (!sliderCoords) {
         for (const frame of this.page.frames()) {
           if (frame === this.page.mainFrame()) continue;
           try {
-            const frameCoords = await frame.evaluate(() => {
-              const all = Array.from(document.querySelectorAll('*'));
-              let track = null;
-              for (const el of all) {
-                const t = (el.innerText || el.textContent || '').trim();
-                if (t.includes('slide to verify') || t.includes('drag the slider') || t.includes('trượt để xác minh') || t.includes('kéo thanh trượt')) {
-                  const r = el.getBoundingClientRect();
-                  if (r.width > 80 && r.height > 15) {
-                    track = el.closest('div[class*="scale"], #nc_1_wrapper, div') || el;
-                    break;
-                  }
-                }
-              }
-              if (!track) {
-                track = document.querySelector('#nc_1_wrapper, .nc_scale, div[class*="nc_scale"], [class*="scale"]');
-              }
-              if (!track) return null;
-              const trackRect = track.getBoundingClientRect();
-              const btn = track.querySelector('.btn_slide, [class*="btn_slide"], #nc_1_n1z, .nc_iconfont');
-              let startX = trackRect.left + 24;
-              let startY = trackRect.top + trackRect.height / 2;
-              if (btn) {
-                const bRect = btn.getBoundingClientRect();
-                startX = bRect.left + bRect.width / 2;
-                startY = bRect.top + bRect.height / 2;
-              }
-              return {
-                startX,
-                startY,
-                endX: trackRect.left + trackRect.width + 10,
-                distance: trackRect.width - 15
-              };
-            }).catch(() => null);
-
+            const frameCoords = await frame.evaluate(findSliderCoords).catch(() => null);
             if (frameCoords) {
               const frameElement = await frame.frameElement();
               const frameBox = await frameElement.boundingBox();
@@ -1339,54 +1348,65 @@ class LazadaPriceMonitor {
         }
       }
 
-      if (!sliderCoords || sliderCoords.distance < 40) {
+      if (sliderCoords && sliderCoords.distance >= 40) {
+        console.log(`[Monitor] 🔄 Kéo thanh trượt từ (${Math.round(sliderCoords.startX)}, ${Math.round(sliderCoords.startY)}) đến (${Math.round(sliderCoords.endX)}, ${Math.round(sliderCoords.startY)})...`);
+
+        await this.page.mouse.move(sliderCoords.startX, sliderCoords.startY);
+        await this.page.waitForTimeout(100);
+        await this.page.mouse.down();
+        await this.page.waitForTimeout(80);
+
+        // Kéo mượt mà theo đường cong ease-out của con người kèm biến thiên jitter
+        const steps = 40;
+        for (let i = 1; i <= steps; i++) {
+          const progress = i / steps;
+          const easeProgress = 1 - Math.pow(1 - progress, 3);
+          const currentX = sliderCoords.startX + (sliderCoords.distance * easeProgress);
+          const currentY = sliderCoords.startY + Math.sin(i / 3) * 1.5;
+          await this.page.mouse.move(currentX, currentY);
+          await this.page.waitForTimeout(6 + Math.floor(Math.random() * 8));
+        }
+
+        await this.page.waitForTimeout(100);
+        await this.page.mouse.up();
+        console.log('[Monitor] ✅ Đã thả thanh trượt. Chờ Lazada xác thực token...');
+        await this.page.waitForTimeout(2000);
+      } else {
         console.warn('[Monitor] Phát hiện dấu hiệu chống bot nhưng không định vị được tọa độ thanh trượt.');
-        return false;
       }
 
-      console.log(`[Monitor] 🔄 Kéo thanh trượt từ (${Math.round(sliderCoords.startX)}, ${Math.round(sliderCoords.startY)}) đến (${Math.round(sliderCoords.endX)}, ${Math.round(sliderCoords.startY)})...`);
+      // 3. Kiểm tra xem hộp thoại hoặc mask còn tồn tại không. Nếu còn, bấm nút đóng X hoặc xóa backdrop để không chặn click
+      const stillHasPopup = await this.page.evaluate(() => {
+        const b = document.querySelector('#baxia-dialog-content, .baxia-dialog, .baxia-dialog-mask');
+        return !!(b && (b.offsetWidth > 0 || b.offsetHeight > 0));
+      }).catch(() => false);
 
-      // Di chuyển chuột tới vị trí nút trượt
-      await this.page.mouse.move(sliderCoords.startX, sliderCoords.startY);
-      await this.page.waitForTimeout(80);
-      await this.page.mouse.down();
-      await this.page.waitForTimeout(60);
+      if (stillHasPopup) {
+        console.log('[Monitor] Đóng hộp thoại chống bot (Click nút X hoặc gỡ mask)...');
+        await this.page.evaluate(() => {
+          const closeBtn = document.querySelector(
+            '.baxia-dialog-close, [class*="dialog-close"], [class*="close-btn"], .icon-close'
+          ) || Array.from(document.querySelectorAll('.baxia-dialog *, #baxia-dialog-content *')).find(el => {
+            const t = (el.innerText || el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return (t === '×' || t === '✕' || t === 'x' || t === 'X') && r.width > 5 && r.width < 50;
+          });
 
-      // Kéo mượt mà tự nhiên với 35 bước, kèm biến thiên vận tốc và độ rung trục Y (jitter)
-      const steps = 35;
-      for (let i = 1; i <= steps; i++) {
-        const progress = i / steps;
-        const currentX = sliderCoords.startX + (sliderCoords.distance * progress);
-        const currentY = sliderCoords.startY + Math.sin(i / 2.5) * 1.5;
-        await this.page.mouse.move(currentX, currentY);
-        await this.page.waitForTimeout(6 + Math.random() * 8);
+          if (closeBtn) {
+            closeBtn.click();
+          } else {
+            const masks = document.querySelectorAll('.baxia-dialog-mask, .baxia-dialog, #baxia-dialog-content');
+            masks.forEach(m => { m.style.display = 'none'; });
+          }
+        }).catch(() => {});
+        await this.page.waitForTimeout(500);
       }
-
-      await this.page.waitForTimeout(80);
-      await this.page.mouse.up();
-      console.log('[Monitor] ✅ Đã thả thanh trượt. Chờ Lazada xác thực token...');
-      await this.page.waitForTimeout(2000);
 
       // Cập nhật lại ảnh xem trước trên Dashboard
       try {
         const qrPath = path.join(__dirname, '..', 'public', 'login-qr.png');
         await this.page.screenshot({ path: qrPath });
       } catch (e) {}
-
-      // Nếu sau khi kéo mà dialog vẫn còn (hoặc có nút đóng X), thử click nút đóng để tránh che màn hình
-      const stillHasPopup = await this.page.evaluate(() => {
-        const b = document.querySelector('#baxia-dialog-content, .baxia-dialog');
-        return !!(b && b.offsetWidth > 0 && b.offsetHeight > 0);
-      }).catch(() => false);
-
-      if (stillHasPopup) {
-        console.log('[Monitor] Hộp thoại vẫn hiển thị, thử nhấp nút đóng (X)...');
-        await this.page.evaluate(() => {
-          const closeBtn = document.querySelector('#baxia-dialog-content .close-btn, #baxia-dialog-content button, .baxia-dialog [class*="close"], .baxia-dialog button');
-          if (closeBtn) closeBtn.click();
-        }).catch(() => {});
-        await this.page.waitForTimeout(500);
-      }
 
       return true;
     } catch (e) {
@@ -1566,45 +1586,51 @@ class LazadaPriceMonitor {
       }
       await itemCb.scrollIntoViewIfNeeded().catch(() => {});
 
-      // Tối ưu tốc độ checkbox:
-      // Trong trường hợp retry (thử lại sau lỗi hệ thống Lazada), uncheck và re-check lại để làm mới token thanh toán
-      if (isRetry && checkboxStatus.targetChecked) {
-        console.log('[AutoOrder] 🔄 Thử lại: Hủy chọn và chọn lại sản phẩm để làm mới phiên token giỏ hàng...');
-        await itemCb.click();
-        await this.page.waitForTimeout(100);
-        await itemCb.click();
-        await this.page.waitForTimeout(350);
-      } else if (checkboxStatus.targetChecked && (checkboxStatus.totalChecked === 1 || (!checkboxStatus.isSelectAll && checkboxStatus.totalChecked <= 1))) {
-        console.log('[AutoOrder] ⚡ Sản phẩm mục tiêu đã được tích chọn sẵn và duy nhất, bỏ qua thao tác checkbox!');
+      // BƯỚC 1: Xử lý checkbox nhanh và chuẩn xác (tránh hủy chọn nếu sản phẩm đã được tích sẵn)
+      const isTargetAlreadyChecked = await itemContainer.evaluate(node => {
+        const input = node.querySelector('input[type="checkbox"]');
+        const label = node.querySelector('label.cart-item-checkbox, .next-checkbox');
+        return (input && (input.checked || input.getAttribute('aria-checked') === 'true')) ||
+               (label && (label.classList.contains('checked') || label.getAttribute('aria-checked') === 'true'));
+      }).catch(() => false);
+
+      const checkoutBtn = this.page.locator('.checkout-order-total-button, button.automation-checkout-order-total-button-button, button:has-text("THANH TOÁN")').first();
+      await checkoutBtn.waitFor({ state: 'visible', timeout: 4000 });
+      let checkoutText = await checkoutBtn.innerText().catch(() => '');
+
+      const isSingleTargetSelected = isTargetAlreadyChecked && (checkoutText.includes('(1)') || checkoutText.includes('( 1 )'));
+
+      if (isSingleTargetSelected && !isRetry) {
+        console.log(`[AutoOrder] ⚡ Sản phẩm đã được tích chọn duy nhất sẵn (${checkoutText}), không cần click checkbox!`);
       } else {
-        // Nếu "CHỌN TẤT CẢ" đang tích hoặc có nhiều sản phẩm khác được chọn: Bỏ chọn tất cả nhanh
-        if (checkboxStatus.isSelectAll || checkboxStatus.totalChecked > 1) {
+        // Nếu có nhiều sản phẩm khác đang được chọn hoặc đang thử lại
+        const isMultipleSelected = !checkoutText.includes('(0)') && !checkoutText.includes('(1)');
+        if (isMultipleSelected || isRetry) {
           console.log('[AutoOrder] Bỏ chọn tất cả để chỉ chọn duy nhất sản phẩm mục tiêu...');
           const selectAllLocator = this.page.locator('.list-header-checkbox, label.list-header-checkbox').first();
           if (await selectAllLocator.count() > 0) {
-            await selectAllLocator.click();
-            await this.page.waitForTimeout(150);
+            await selectAllLocator.click({ force: true }).catch(() => {});
+            await this.page.waitForTimeout(200);
           }
         }
 
         // Tích chọn sản phẩm mục tiêu
-        console.log('[AutoOrder] ⚡ Click vào ô checkbox của sản phẩm...');
-        await itemCb.click();
-        await this.page.waitForTimeout(350);
+        console.log('[AutoOrder] ⚡ Click vào ô checkbox của sản phẩm mục tiêu...');
+        await itemCb.scrollIntoViewIfNeeded().catch(() => {});
+        await itemCb.click({ force: true });
+
+        // Chờ đồng bộ số lượng trên nút THANH TOÁN
+        for (let i = 0; i < 30; i++) {
+          await this.page.waitForTimeout(80);
+          checkoutText = await checkoutBtn.innerText().catch(() => '');
+          if (checkoutText && !checkoutText.includes('(0)')) {
+            break;
+          }
+        }
+        await this.page.waitForTimeout(250);
       }
 
       // BƯỚC 2: Click vào nút THANH TOÁN
-      const checkoutBtn = this.page.locator('.checkout-order-total-button, button.automation-checkout-order-total-button-button, button:has-text("THANH TOÁN")').first();
-      await checkoutBtn.waitFor({ state: 'visible', timeout: 4000 });
-
-      // Chờ nhanh (poll mỗi 30ms) cho đến khi nút thanh toán cập nhật số lượng >= 1
-      let checkoutText = await checkoutBtn.innerText().catch(() => '');
-      for (let i = 0; i < 40; i++) {
-        if (checkoutText && !checkoutText.includes('(0)')) break;
-        await this.page.waitForTimeout(30);
-        checkoutText = await checkoutBtn.innerText().catch(() => '');
-      }
-
       if (checkoutText.includes('(0)')) {
         throw new Error('Chưa chọn được sản phẩm: Nút thanh toán vẫn hiển thị THANH TOÁN(0)');
       }
@@ -1627,8 +1653,8 @@ class LazadaPriceMonitor {
           break;
         }
 
-        // Nếu sau 1s hoặc 2.5s vẫn ở /cart, kiểm tra captcha trước rồi bấm lại nút THANH TOÁN
-        if (i === 10 || i === 25) {
+        // Nếu sau 1.2s hoặc 2.5s vẫn ở /cart, kiểm tra captcha trước rồi bấm lại nút THANH TOÁN
+        if (i === 12 || i === 25) {
           await this.handleCaptchaIfPresent();
           if (await checkoutBtn.isVisible().catch(() => false)) {
             console.log('[AutoOrder] Vẫn ở trang giỏ hàng, re-click nút THANH TOÁN ngay...');
@@ -1646,16 +1672,27 @@ class LazadaPriceMonitor {
 
       // BƯỚC 4: Tìm và click nút "Đặt hàng" màu cam trên trang thanh toán với tốc độ cao
       const clickOrangeDatHang = async () => {
+        // 1. Thử dùng Playwright locator trước
+        const pwBtn = this.page.locator('.checkout-order-total button, button.automation-checkout-order-total-button-button, button:has-text("Đặt hàng"), button:has-text("ĐẶT HÀNG")').first();
+        if (await pwBtn.isVisible({ timeout: 400 }).catch(() => false)) {
+          await pwBtn.scrollIntoViewIfNeeded().catch(() => {});
+          await pwBtn.click({ force: true }).catch(() => {});
+          const box = await pwBtn.boundingBox().catch(() => null);
+          return { found: true, x: box?.x || 0, y: box?.y || 0 };
+        }
+
+        // 2. Thử duyệt DOM tìm nút màu cam
         return await this.page.evaluate(() => {
-          const all = Array.from(document.querySelectorAll('*'));
+          const all = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
           for (const el of all) {
-            const text = (el.innerText || '').trim();
-            const style = window.getComputedStyle(el);
-            const bg = style.backgroundColor;
-            const isOrange = bg.includes('245, 114, 36') || bg.includes('255, 96, 0') || bg.includes('255, 102, 0');
-            if ((text === 'Đặt hàng' || text === 'ĐẶT HÀNG') && (isOrange || el.closest('.checkout-order-total'))) {
+            const text = (el.innerText || el.textContent || '').trim();
+            const isDatHang = text === 'Đặt hàng' || text === 'ĐẶT HÀNG' || text.toLowerCase() === 'đặt hàng';
+            if (isDatHang) {
+              const style = window.getComputedStyle(el);
+              const bg = style.backgroundColor;
+              const isOrange = bg.includes('245, 114, 36') || bg.includes('255, 96, 0') || bg.includes('255, 102, 0');
               const rect = el.getBoundingClientRect();
-              if (rect.width > 50 && rect.height > 20) {
+              if ((isOrange || el.closest('.checkout-order-total') || el.closest('[class*="checkout"]')) && rect.width > 40 && rect.height > 15) {
                 el.scrollIntoView({ behavior: 'auto', block: 'center' });
                 el.click();
                 el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -1675,12 +1712,25 @@ class LazadaPriceMonitor {
         // Kiểm tra popup chống bot trên trang thanh toán
         await this.handleCaptchaIfPresent();
 
-        // Kiểm tra nút "THỬ LẠI" (khi Lazada gặp sự cố tải đơn hàng tạm thời LZD_BUY_RENDER)
-        const tryAgainBtn = this.page.locator('button:has-text("THỬ LẠI"), a:has-text("THỬ LẠI"), .next-btn:has-text("THỬ LẠI")').first();
-        if (await tryAgainBtn.isVisible().catch(() => false)) {
-          console.log('[AutoOrder] 🔄 Phát hiện nút "THỬ LẠI" trên trang thanh toán, tiến hành click...');
-          await tryAgainBtn.click().catch(() => {});
-          await this.page.waitForTimeout(1000);
+        // Kiểm tra xem có nút "THỬ LẠI" (khi Lazada gặp sự cố tải đơn hàng tạm thời LZD_BUY_RENDER)
+        const tryAgainClicked = await this.page.evaluate(() => {
+          const all = Array.from(document.querySelectorAll('*'));
+          for (const el of all) {
+            const t = (el.innerText || el.textContent || '').trim();
+            if (t === 'THỬ LẠI' || t === 'Thử lại') {
+              const r = el.getBoundingClientRect();
+              if (r.width > 20 && r.height > 15) {
+                el.click();
+                return true;
+              }
+            }
+          }
+          return false;
+        }).catch(() => false);
+
+        if (tryAgainClicked) {
+          console.log('[AutoOrder] 🔄 Đã click nút "THỬ LẠI" trên trang thanh toán, chờ tải lại...');
+          await this.page.waitForTimeout(2000);
           continue;
         }
 
@@ -1941,16 +1991,19 @@ class LazadaPriceMonitor {
         errorMessage: `Tự động đặt hàng thành công! Đã xử lý thanh toán và xác nhận sản phẩm đã được mua khỏi giỏ hàng.`
       });
 
-      // Gửi thông báo Telegram
+      // BẮT BUỘC GỬI THÔNG BÁO TELEGRAM THÀNH CÔNG VỚI AWAIT ĐẦY ĐỦ
       if (config.telegram?.enabled && config.telegram?.botToken && config.telegram?.chatId) {
-        const orderMsg = formatOrderSuccessMessage(targetItem, threshold);
-        sendTelegramMessage(config.telegram.botToken, config.telegram.chatId, orderMsg)
-          .then(res => {
-            if (res.success && orderLog?.id) {
-              updateLogTelegramStatus(orderLog.id, 'SENT');
-            }
-          })
-          .catch(e => console.error('[AutoOrder] Lỗi gửi tin Telegram đặt hàng:', e.message));
+        try {
+          console.log('[AutoOrder] 📲 Đang gửi thông báo ĐẶT HÀNG THÀNH CÔNG sang Telegram bot...');
+          const orderMsg = formatOrderSuccessMessage(targetItem, threshold);
+          const tgRes = await sendTelegramMessage(config.telegram.botToken, config.telegram.chatId, orderMsg);
+          console.log(`[AutoOrder] 📲 Kết quả gửi thông báo Telegram: ${tgRes?.success ? '✅ Thành công' : '❌ Thất bại: ' + (tgRes?.error || 'Không rõ')}`);
+          if (tgRes?.success && orderLog?.id) {
+            updateLogTelegramStatus(orderLog.id, 'SENT');
+          }
+        } catch (tgErr) {
+          console.error('[AutoOrder] ❌ Lỗi gửi tin Telegram đặt hàng:', tgErr.message);
+        }
       }
 
       this.emitState({
